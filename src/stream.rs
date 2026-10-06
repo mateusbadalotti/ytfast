@@ -213,7 +213,7 @@ async fn resolve(
         bail!("not a video id: {video_id}");
     }
     if let Some(session) = session.filter(|_| ytdlp.session_works.load(Ordering::Relaxed)) {
-        let file = scratch.join(format!("cookies-{video_id}.txt"));
+        let file = scratch.join(format!("{COOKIE_FILE}{video_id}.txt"));
         let result = match write_private(&file, &session.to_netscape()).await {
             Ok(()) => match resolve_with(ytdlp, video_id, Some(&file), TV_CLIENT).await {
                 Ok(source) => Ok(source),
@@ -236,6 +236,21 @@ async fn resolve(
         }
     }
     resolve_with(ytdlp, video_id, None, SKIP_HLS).await
+}
+
+/// Names the session's cookies, written for a moment while yt-dlp reads them.
+const COOKIE_FILE: &str = "cookies-";
+
+/// The cookie files a run cut short left behind: nothing else deletes them.
+fn remove_cookie_files(scratch: &Path) {
+    let Ok(entries) = std::fs::read_dir(scratch) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(COOKIE_FILE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Writes a file only this user can read.
@@ -321,6 +336,7 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(ytdlp: Arc<Ytdlp>, scratch: PathBuf) -> Self {
+        remove_cookie_files(&scratch);
         Self {
             ytdlp,
             scratch,
@@ -696,6 +712,18 @@ async fn fetch_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leftover_cookie_files_are_removed_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("ytfast-scratch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cookies-abc.txt"), "secret").unwrap();
+        std::fs::write(dir.join("art.jpg"), "kept").unwrap();
+        remove_cookie_files(&dir);
+        assert!(!dir.join("cookies-abc.txt").exists());
+        assert!(dir.join("art.jpg").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn chunks_cover_the_file_once() {
