@@ -7,7 +7,7 @@ use egui::{
 };
 
 use crate::app::{Action, App, Side};
-use crate::model::{Page, Rating};
+use crate::model::{Loadable, Page, Rating};
 use crate::queue::Repeat;
 use crate::theme::{self, Icon};
 use crate::ui::widgets::{self, format_time, icon_button, icon_button_at};
@@ -20,6 +20,9 @@ const PLAY_RADIUS: f32 = 19.0;
 const SEEK_MAX_WIDTH: f32 = 600.0;
 const TIME_GAP: f32 = 10.0;
 const VOLUME_WIDTH: f32 = 80.0;
+const LIKE_BUTTON: f32 = 32.0;
+/// Kept after the track's text for the like button, gaps included.
+const LIKE_ROOM: f32 = 40.0;
 
 pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     egui::Panel::bottom("player")
@@ -80,9 +83,10 @@ fn track(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
     {
         actions.push(Action::Open(Page::Album(id)));
     }
+    // Room at the end for the like button, which follows the text.
     let text = Rect::from_min_max(
         pos2(art.right() + 12.0, middle - 21.0),
-        pos2(rect.right(), middle + 21.0),
+        pos2(rect.right() - LIKE_ROOM, middle + 21.0),
     );
     let mut column = ui.new_child(
         UiBuilder::new()
@@ -101,6 +105,23 @@ fn track(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
         .truncate(),
     );
     widgets::artist_links(&mut column, track, 12.5, theme::SECONDARY, actions);
+
+    // One like button beside the track's name, filled once liked.
+    if app.signed_in {
+        let liked = app.rating_of(&track.id) == Some(Rating::Like);
+        let (icon, next, tint, tip) = if liked {
+            (Icon::Liked, Rating::None, theme::TEXT, "Remove like")
+        } else {
+            (Icon::Like, Rating::Like, theme::SECONDARY, "Like")
+        };
+        let at = Rect::from_center_size(
+            pos2(column.min_rect().right() + LIKE_ROOM / 2.0, middle),
+            Vec2::splat(LIKE_BUTTON),
+        );
+        if icon_button_at(ui, at, icon, 17.0, tint, tip).clicked() {
+            actions.push(Action::Rate(track.id.clone(), next));
+        }
+    }
 }
 
 fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
@@ -115,20 +136,6 @@ fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
     };
     let at = |dx: f32, size: f32| Rect::from_center_size(pos2(x + dx, y), Vec2::splat(size));
     let queue = &app.settings.queue;
-
-    // One like button beside repeat, filled once liked; a dislike stays in
-    // the row menus.
-    if let Some(track) = app.current().filter(|_| app.signed_in) {
-        let liked = app.rating_of(&track.id) == Some(Rating::Like);
-        let (icon, next, tint, tip) = if liked {
-            (Icon::Liked, Rating::None, theme::TEXT, "Remove like")
-        } else {
-            (Icon::Like, Rating::Like, theme::SECONDARY, "Like")
-        };
-        if icon_button_at(ui, at(144.0, 32.0), icon, 17.0, tint, tip).clicked() {
-            actions.push(Action::Rate(track.id.clone(), next));
-        }
-    }
 
     if icon_button_at(
         ui,
@@ -290,15 +297,15 @@ fn extras(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     {
         actions.push(Action::ToggleSide(Side::Queue));
     }
-    if icon_button(
-        ui,
-        Icon::Lyrics,
-        18.0,
-        on(app.side == Some(Side::Lyrics)),
-        "Lyrics",
-    )
-    .clicked()
-    {
+    // Greyed out once the track turns out to have none, unless the panel is
+    // open, so it can still be closed from here.
+    let showing = app.side == Some(Side::Lyrics);
+    let none = app
+        .current()
+        .is_some_and(|t| matches!(app.lyrics.get(&t.id), Some(Loadable::Loaded(None))));
+    if none && !showing {
+        widgets::icon_unavailable(ui, Icon::Lyrics, 18.0, "No lyrics for this track");
+    } else if icon_button(ui, Icon::Lyrics, 18.0, on(showing), "Lyrics").clicked() {
         actions.push(Action::ToggleSide(Side::Lyrics));
     }
 }

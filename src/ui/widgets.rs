@@ -14,8 +14,20 @@ use crate::theme::{self, Icon};
 
 /// A round icon button that lights up under the pointer.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, tint: Color32, tooltip: &str) -> Response {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size + 14.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size + ICON_BUTTON_PADDING), Sense::hover());
     icon_button_at(ui, rect, icon, size, tint, tooltip)
+}
+
+const ICON_BUTTON_PADDING: f32 = 14.0;
+
+/// An icon button's place with its icon greyed out, for when it has nothing
+/// to do; the tooltip says why.
+pub fn icon_unavailable(ui: &mut Ui, icon: Icon, size: f32, tooltip: &str) {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(size + ICON_BUTTON_PADDING), Sense::hover());
+    icon.image(theme::DIM, size)
+        .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
+    response.on_hover_text(tooltip);
 }
 
 /// An icon button in a given place, for rows laid out by hand.

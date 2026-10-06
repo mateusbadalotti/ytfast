@@ -38,6 +38,9 @@ pub struct Settings {
     /// the ones left out.
     pub home_order: Vec<String>,
     pub home_hidden: Vec<String>,
+    /// YouTube's section titles already offered once Home was arranged; a
+    /// title not among them is new, and starts hidden.
+    pub home_known: Vec<String>,
     /// Artists picked for Home's sets and new-releases sections.
     pub home_artists: Vec<HomeArtist>,
     pub queue: Queue,
@@ -68,6 +71,7 @@ impl Default for Settings {
             recent_searches: Vec::new(),
             home_order: Vec::new(),
             home_hidden: Vec::new(),
+            home_known: Vec::new(),
             home_artists: Vec::new(),
             queue: Queue::default(),
             position: 0.0,

@@ -4,8 +4,8 @@
 //! it does on the left, its control on the right.
 
 use egui::{
-    Align, Align2, Frame, Id, Label, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, UiBuilder,
-    Vec2, pos2, vec2,
+    Align, Frame, Id, Label, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, UiBuilder, Vec2,
+    pos2, vec2,
 };
 
 use crate::app::{Action, App, HomeSection};
@@ -368,6 +368,29 @@ fn home_artists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
 }
 
 const SECTION_ROW: f32 = 46.0;
+const BADGE_GAP: f32 = 10.0;
+const BADGE_HEIGHT: f32 = 18.0;
+const BADGE_PADDING: f32 = 7.0;
+
+/// Where a Home section comes from: the app's own, in its red, or YouTube's,
+/// in grey. Drawn from `at`, on its centre line.
+fn source_badge(painter: &egui::Painter, at: egui::Pos2, own: bool) {
+    let (text, fill, color) = if own {
+        (
+            "ytfast",
+            theme::ACCENT.gamma_multiply(0.18),
+            theme::ACCENT_HOVER,
+        )
+    } else {
+        ("YouTube", theme::RAISED, theme::SECONDARY)
+    };
+    let label = painter.layout_no_wrap(text.to_string(), theme::semibold(10.5), color);
+    let size = vec2(label.size().x + 2.0 * BADGE_PADDING, BADGE_HEIGHT);
+    let badge = Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size);
+    painter.rect_filled(badge, BADGE_HEIGHT / 2.0, fill);
+    let text_at = badge.center() - label.size() / 2.0;
+    painter.galley(text_at, label, color);
+}
 /// The up and down buttons at a section row's end.
 const ARROWS_WIDTH: f32 = 90.0;
 
@@ -436,12 +459,14 @@ fn section_row(
     );
     let painter = ui.painter().with_clip_rect(clip);
     let color = if shown { theme::TEXT } else { theme::DIM };
-    painter.text(
-        pos2(left, toggle.rect.center().y),
-        Align2::LEFT_CENTER,
-        title,
-        theme::medium(14.0),
-        color,
+    let middle = toggle.rect.center().y;
+    let name = painter.layout_no_wrap(title.to_string(), theme::medium(14.0), color);
+    let name_width = name.size().x;
+    painter.galley(pos2(left, middle - name.size().y / 2.0), name, color);
+    source_badge(
+        &painter,
+        pos2(left + name_width + BADGE_GAP, middle),
+        !matches!(section, HomeSection::Feed(_)),
     );
     inside.with_layout(Layout::right_to_left(Align::Center), |ui| {
         let tint = |enabled: bool| match (enabled, over) {

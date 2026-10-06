@@ -60,12 +60,14 @@ const REPO_URL: &str = "https://github.com/mateusbadalotti/ytfast";
 pub const HOME_PLAYLISTS: &str = "Your playlists";
 pub const HOME_SETS: &str = "Sets from your artists";
 pub const HOME_NEW: &str = "New from your artists";
+pub const HOME_LONG: &str = "Your long listens";
 
 pub enum HomeSection<'a> {
     Feed(&'a Shelf),
     Playlists,
     Sets,
     New,
+    Long,
 }
 
 impl HomeSection<'_> {
@@ -75,11 +77,14 @@ impl HomeSection<'_> {
             HomeSection::Playlists => HOME_PLAYLISTS,
             HomeSection::Sets => HOME_SETS,
             HomeSection::New => HOME_NEW,
+            HomeSection::Long => HOME_LONG,
         }
     }
 }
 /// Shelf titles whose order is remembered; YouTube rotates some daily.
 const HOME_ORDER_KEPT: usize = 60;
+/// YouTube's section titles remembered as already offered.
+const HOME_KNOWN_KEPT: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -188,6 +193,8 @@ pub struct App {
     /// Sets by artist id, for Home's sets section.
     pub artist_sets: HashMap<String, Loadable<Vec<Item>>>,
     pub sets_artist: Option<String>,
+    /// Home's Long listens, asked for once the section shows.
+    pub long_listens: Loadable<Vec<Item>>,
     /// The menu bar asked for the search field.
     pub focus_search: bool,
     /// The volume to go back to when Mute is picked again.
@@ -307,6 +314,7 @@ impl App {
             artists: HashMap::new(),
             artist_sets: HashMap::new(),
             sets_artist: None,
+            long_listens: Loadable::NotLoaded,
             focus_search: false,
             unmute_to,
             artist_query: String::new(),
@@ -613,7 +621,8 @@ impl App {
         let Some(track) = self.current().cloned() else {
             return;
         };
-        if self.side != Some(Side::Lyrics) || self.lyrics.contains_key(&track.id) {
+        // Asked for every track, so the lyrics button knows when there are none.
+        if self.lyrics.contains_key(&track.id) {
             return;
         }
         self.lyrics.insert(track.id.clone(), Loadable::Loading);
@@ -892,6 +901,8 @@ impl App {
                     self.toast(format!("{} is on Home now", artist.name));
                     self.settings.home_artists.push(artist);
                     self.dirty = true;
+                    // Picked artists feed Long listens too: look again.
+                    self.long_listens = Loadable::NotLoaded;
                     self.load_home_extras();
                 }
             }
@@ -901,6 +912,7 @@ impl App {
                     self.sets_artist = None;
                 }
                 self.dirty = true;
+                self.long_listens = Loadable::NotLoaded;
                 self.load_home_extras();
             }
             Action::FindArtists(query) => {
@@ -912,6 +924,7 @@ impl App {
                 self.load_home_extras();
             }
             Action::ShowShelf(title, shown) => {
+                self.know_sections();
                 let hidden = &mut self.settings.home_hidden;
                 hidden.retain(|t| *t != title);
                 if !shown {
@@ -920,10 +933,14 @@ impl App {
                 self.dirty = true;
                 self.load_home_extras();
             }
-            Action::MoveShelf { title, up } => self.move_shelf(&title, up),
+            Action::MoveShelf { title, up } => {
+                self.know_sections();
+                self.move_shelf(&title, up);
+            }
             Action::ResetHome => {
                 self.settings.home_order.clear();
                 self.settings.home_hidden.clear();
+                self.settings.home_known.clear();
                 self.dirty = true;
             }
             Action::LoadMoreHome => {
@@ -1107,11 +1124,15 @@ impl App {
             .get()
             .map(|f| f.shelves.as_slice())
             .unwrap_or_default();
-        let mut sections: Vec<HomeSection> =
-            [HomeSection::Playlists, HomeSection::Sets, HomeSection::New]
-                .into_iter()
-                .chain(feed.iter().map(HomeSection::Feed))
-                .collect();
+        let mut sections: Vec<HomeSection> = [
+            HomeSection::Playlists,
+            HomeSection::Sets,
+            HomeSection::New,
+            HomeSection::Long,
+        ]
+        .into_iter()
+        .chain(feed.iter().map(HomeSection::Feed))
+        .collect();
         let order = &self.settings.home_order;
         sections.sort_by_key(|s| {
             order
@@ -1195,6 +1216,67 @@ impl App {
         self.actions.push(action);
     }
 
+    /// Once Home has been arranged, a section YouTube had not sent before
+    /// starts hidden, for the person to switch on in Settings. Before that,
+    /// Home is YouTube's as it comes.
+    fn hide_new_sections(&mut self) {
+        let settings = &self.settings;
+        if settings.home_order.is_empty()
+            && settings.home_hidden.is_empty()
+            && settings.home_known.is_empty()
+        {
+            return;
+        }
+        let Some(feed) = self.home.get() else {
+            return;
+        };
+        let new: Vec<String> = feed
+            .shelves
+            .iter()
+            .map(|s| &s.title)
+            .filter(|t| {
+                ![
+                    &settings.home_known,
+                    &settings.home_order,
+                    &settings.home_hidden,
+                ]
+                .iter()
+                .any(|list| list.contains(t))
+            })
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        log::info!("new on Home, hidden until switched on: {}", new.join(", "));
+        self.settings.home_hidden.extend(new.iter().cloned());
+        self.remember_known(new);
+    }
+
+    /// Takes the sections loaded now as offered, the moment Home is first
+    /// arranged, so only later ones count as new.
+    fn know_sections(&mut self) {
+        let titles: Vec<String> = self
+            .home
+            .get()
+            .map(|f| f.shelves.iter().map(|s| s.title.clone()).collect())
+            .unwrap_or_default();
+        let known = &self.settings.home_known;
+        let unknown: Vec<String> = titles.into_iter().filter(|t| !known.contains(t)).collect();
+        self.remember_known(unknown);
+    }
+
+    fn remember_known(&mut self, titles: Vec<String>) {
+        if titles.is_empty() {
+            return;
+        }
+        let known = &mut self.settings.home_known;
+        known.extend(titles);
+        let over = known.len().saturating_sub(HOME_KNOWN_KEPT);
+        known.drain(..over);
+        self.dirty = true;
+    }
+
     /// Every page of Home's feed, one after the other, while Settings lists
     /// its sections to arrange.
     fn load_whole_home(&mut self) {
@@ -1223,6 +1305,21 @@ impl App {
                     self.load_artist(&id);
                 }
             }
+        }
+        if self.shows_shelf(HOME_LONG)
+            && self.signed_in
+            && matches!(self.long_listens, Loadable::NotLoaded)
+        {
+            self.long_listens = Loadable::Loading;
+            let api = self.backend.api.clone();
+            let picked: Vec<String> = self
+                .settings
+                .home_artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect();
+            self.backend
+                .run(async move { Event::LongListens(api.long_listens(&picked).await) });
         }
         if self.shows_shelf(HOME_SETS)
             && let Some(artist) = self.sets_artist_now().cloned()
@@ -1386,6 +1483,7 @@ impl App {
                 } else {
                     self.home = Loadable::from_result(result);
                 }
+                self.hide_new_sections();
                 self.load_whole_home();
             }
             Event::Collection { id, result } => {
@@ -1443,6 +1541,13 @@ impl App {
             }
             Event::ArtistSets { id, result } => {
                 self.artist_sets.insert(id, Loadable::from_result(result));
+            }
+            Event::LongListens(result) => {
+                match &result {
+                    Ok(items) => log::info!("long listens: {} found", items.len()),
+                    Err(error) => log::warn!("long listens: {error:#}"),
+                }
+                self.long_listens = Loadable::from_result(result);
             }
             Event::Feed {
                 target,

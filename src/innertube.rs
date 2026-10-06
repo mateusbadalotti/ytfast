@@ -38,6 +38,11 @@ const MIN_SET_SECONDS: u32 = 30 * 60;
 /// finds their sets, which the bare name buries.
 const SET_QUERIES: [&str; 5] = ["", " set", " live", " mix", " b2b"];
 const SETS_KEPT: usize = 40;
+/// The account's most played artists whose sets Long listens looks up,
+/// beside the picked ones.
+const LONG_LISTEN_ARTISTS: usize = 6;
+const LONG_LISTENS_KEPT: usize = 200;
+const HISTORY: &str = "FEmusic_history";
 
 /// YouTube Music's own generated playlists, not ones the person made or saved.
 const HIDDEN_PLAYLISTS: [&str; 1] = ["episodes for later"];
@@ -583,6 +588,54 @@ impl Innertube {
     /// title names them, from a date-sorted search of the name and a few
     /// set words. One query failing costs only its results.
     pub async fn artist_sets(&self, name: &str) -> Result<Vec<Item>> {
+        Ok(self
+            .dated_sets(name)
+            .await?
+            .into_iter()
+            .map(|(_, item)| item)
+            .take(SETS_KEPT)
+            .collect())
+    }
+
+    /// Long listens for the account: the long tracks in its recent history,
+    /// then the newest sets by the `picked` artists and the ones it played
+    /// most.
+    pub async fn long_listens(&self, picked: &[String]) -> Result<Vec<Item>> {
+        let json = self.browse_id(HISTORY, None).await?;
+        let played: Vec<Item> = rows(&json).collect();
+        let mut plays: Vec<(&str, usize)> = Vec::new();
+        for artist in played.iter().flat_map(|item| &item.artists) {
+            match plays.iter_mut().find(|(name, _)| *name == artist.name) {
+                Some((_, count)) => *count += 1,
+                None => plays.push((&artist.name, 1)),
+            }
+        }
+        plays.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        let mut artists: Vec<&str> = picked.iter().map(String::as_str).collect();
+        for (name, _) in plays.iter().take(LONG_LISTEN_ARTISTS) {
+            if !artists.contains(name) {
+                artists.push(name);
+            }
+        }
+        let found =
+            futures_util::future::join_all(artists.iter().map(|name| self.dated_sets(name))).await;
+        let mut sets: Vec<(u64, Item)> = found.into_iter().flatten().flatten().collect();
+        sets.sort_by_key(|(age, _)| *age);
+        let mut long: Vec<Item> = Vec::new();
+        let played_long = played
+            .into_iter()
+            .filter(|item| item.duration.is_some_and(|d| d >= MIN_SET_SECONDS));
+        for item in played_long.chain(sets.into_iter().map(|(_, item)| item)) {
+            if !long.iter().any(|kept| kept.id == item.id) {
+                long.push(item);
+            }
+        }
+        long.truncate(LONG_LISTENS_KEPT);
+        Ok(long)
+    }
+
+    /// `artist_sets` with each set's age in seconds, for merging lists.
+    async fn dated_sets(&self, name: &str) -> Result<Vec<(u64, Item)>> {
         let searches = SET_QUERIES.map(|words| {
             self.post_web(
                 "search",
@@ -618,11 +671,7 @@ impl Innertube {
         // The search sorts its main list only; shelves it adds come after,
         // out of order.
         sets.sort_by_key(|(age, _)| *age);
-        Ok(sets
-            .into_iter()
-            .map(|(_, item)| item)
-            .take(SETS_KEPT)
-            .collect())
+        Ok(sets)
     }
 
     pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {

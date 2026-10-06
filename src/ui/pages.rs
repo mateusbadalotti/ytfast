@@ -7,8 +7,8 @@ use egui::{
 };
 
 use crate::app::{
-    Action, App, HOME_PLAYLISTS, HOME_SETS, HomeSection, LIBRARY_ALBUMS, LIBRARY_ARTISTS,
-    LIBRARY_PLAYLISTS,
+    Action, App, HOME_LONG, HOME_PLAYLISTS, HOME_SETS, HomeSection, LIBRARY_ALBUMS,
+    LIBRARY_ARTISTS, LIBRARY_PLAYLISTS,
 };
 use crate::model::{Browse, Collection, Item, Kind, Loadable, Page, SearchFilter, Shelf};
 use crate::theme::{self, Icon};
@@ -146,6 +146,7 @@ pub fn home(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                 HomeSection::Playlists => playlists_shelf(ui, app, actions),
                 HomeSection::Sets => sets_shelf(ui, app, actions),
                 HomeSection::New => new_releases(ui, app, actions),
+                HomeSection::Long => long_listens(ui, app, actions),
             }
         });
     }
@@ -216,6 +217,21 @@ fn sets_shelf(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     if let Some(id) = picked {
         actions.push(Action::PickSetsArtist(id));
     }
+}
+
+/// Long tracks from the history, then new sets by the picked artists and
+/// the ones played most; in rows, as YouTube lays out its own.
+fn long_listens(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    let Some(items) = app.long_listens.get().filter(|items| !items.is_empty()) else {
+        return;
+    };
+    let shelf = Shelf {
+        title: HOME_LONG.to_string(),
+        items: items.clone(),
+        list: true,
+        more: None,
+    };
+    widgets::shelf(ui, app, &shelf, actions);
 }
 
 /// A shelf per picked artist: their latest singles and albums, then their

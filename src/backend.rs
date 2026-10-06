@@ -85,6 +85,7 @@ pub enum Event {
         id: String,
         result: Result<Vec<Item>>,
     },
+    LongListens(Result<Vec<Item>>),
     Feed {
         target: Browse,
         more: bool,
