@@ -164,11 +164,15 @@ async fn lrclib(http: &reqwest::Client, track: &Item) -> Result<Option<Lyrics>> 
             .header("Lrclib-Client", client)
             .query(&get_query)
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
-        Ok::<_, anyhow::Error>(vec![response.error_for_status()?.json::<Record>().await?])
+        let response = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        Ok::<_, anyhow::Error>(vec![response.json::<Record>().await?])
     };
     let search = async {
         let response = http
@@ -176,12 +180,16 @@ async fn lrclib(http: &reqwest::Client, track: &Item) -> Result<Option<Lyrics>> 
             .header("Lrclib-Client", client)
             .query(&[("track_name", &title), ("artist_name", &artist)])
             .send()
-            .await?;
-        Ok::<_, anyhow::Error>(response.error_for_status()?.json::<Vec<Record>>().await?)
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        Ok::<_, anyhow::Error>(response.json::<Vec<Record>>().await?)
     };
     let (get, search) = tokio::join!(get, search);
     if let (Err(error), Err(_)) = (&get, &search) {
-        bail!("LRCLIB: {error:#}");
+        bail!("LRCLIB did not answer: {error:#}");
     }
     let records: Vec<Record> = get
         .unwrap_or_default()

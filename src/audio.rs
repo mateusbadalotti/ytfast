@@ -2,16 +2,17 @@
 //! crossfade between two tracks, and the volume. It all runs inside the
 //! device callback, which `player.rs` hands this mixer to.
 
-use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel, sync_channel};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder, DecoderOptions};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as DecodeError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::TimeBase;
@@ -31,16 +32,18 @@ pub enum EqPreset {
     Bass,
     Vocal,
     Treble,
+    Rock,
     Late,
     Custom,
 }
 
 impl EqPreset {
-    pub const ALL: [EqPreset; 6] = [
+    pub const ALL: [EqPreset; 7] = [
         EqPreset::Flat,
         EqPreset::Bass,
         EqPreset::Vocal,
         EqPreset::Treble,
+        EqPreset::Rock,
         EqPreset::Late,
         EqPreset::Custom,
     ];
@@ -51,6 +54,7 @@ impl EqPreset {
             EqPreset::Bass => "Bass boost",
             EqPreset::Vocal => "Vocal",
             EqPreset::Treble => "Treble",
+            EqPreset::Rock => "Rock",
             EqPreset::Late => "Late night",
             EqPreset::Custom => "Custom",
         }
@@ -63,37 +67,51 @@ impl EqPreset {
             EqPreset::Bass => [10.0, 8.0, 5.0, 2.0, 0.0, -1.0, -1.0, 0.0, 0.0],
             EqPreset::Vocal => [-3.0, -1.0, 2.0, 5.0, 6.0, 4.0, 2.0, 0.0, -1.0],
             EqPreset::Treble => [-2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 7.0, 9.0, 10.0],
+            // Winamp's Rock curve on these bands: lows and highs up, mids back.
+            EqPreset::Rock => [5.0, 3.0, -2.0, -4.0, -2.0, 1.0, 4.0, 5.0, 6.0],
             EqPreset::Late => [5.0, 4.0, 2.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0],
             EqPreset::Custom => return None,
         })
     }
 }
 
-/// One decoded track, frame by frame, always as stereo.
+/// Opus always decodes at 48 kHz, whatever the container says.
+const OPUS_RATE: u32 = 48_000;
+/// The longest Opus packet: 120 ms at 48 kHz.
+const OPUS_MAX_FRAMES: usize = 5760;
+
+/// Symphonia decodes AAC; Opus, which it does not, goes to `opus-decoder`.
+enum Codec {
+    Symphonia(Box<dyn Decoder>),
+    Opus {
+        decoder: opusic_c::Decoder,
+        /// Encoder priming at the start, which is not part of the song.
+        skip: usize,
+        buffer: Vec<f32>,
+    },
+}
+
+/// One decoded track, packet by packet, always as stereo.
 pub struct Track {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    codec: Codec,
     track_id: u32,
     time_base: Option<TimeBase>,
     pub rate: u32,
     channels: usize,
-    samples: Vec<f32>,
-    read: usize,
     /// Frames handed out since the start (or the last seek).
     frames: u64,
     pub duration: Option<f64>,
-    done: bool,
+    /// Why reading stopped early: the download failed, not the file ended.
+    pub failure: Option<String>,
 }
 
 impl Track {
-    pub fn open(bytes: Arc<Vec<u8>>) -> Result<Self> {
-        let source =
-            MediaSourceStream::new(Box::new(Cursor::new(ArcBytes(bytes))), Default::default());
-        let mut hint = Hint::new();
-        hint.with_extension("m4a");
+    pub fn open(source: Box<dyn MediaSource>) -> Result<Self> {
+        let source = MediaSourceStream::new(source, Default::default());
         let probed = symphonia::default::get_probe()
             .format(
-                &hint,
+                &Hint::new(),
                 source,
                 &FormatOptions {
                     enable_gapless: true,
@@ -109,22 +127,57 @@ impl Track {
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
             .context("no audio track")?;
         let params = &track.codec_params;
-        let rate = params.sample_rate.context("no sample rate")?;
-        let duration = params.n_frames.map(|n| n as f64 / f64::from(rate));
         let channels = params.channels.map_or(2, |c| c.count());
-        let decoder = symphonia::default::get_codecs().make(params, &DecoderOptions::default())?;
+        let (codec, rate) = if params.codec == CODEC_TYPE_OPUS {
+            // OpusHead: magic, version, channels, then the pre-skip.
+            let skip = params
+                .extra_data
+                .as_deref()
+                .filter(|head| head.len() >= 12 && head.starts_with(b"OpusHead"))
+                .map_or(0, |head| {
+                    usize::from(u16::from_le_bytes([head[10], head[11]]))
+                });
+            let layout = match channels {
+                1 => opusic_c::Channels::Mono,
+                2 => opusic_c::Channels::Stereo,
+                n => anyhow::bail!("Opus with {n} channels"),
+            };
+            let decoder = opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000)
+                .map_err(|e| anyhow::anyhow!("Opus: {e:?}"))?;
+            let buffer = vec![0.0; OPUS_MAX_FRAMES * channels];
+            (
+                Codec::Opus {
+                    decoder,
+                    skip,
+                    buffer,
+                },
+                OPUS_RATE,
+            )
+        } else {
+            let decoder =
+                symphonia::default::get_codecs().make(params, &DecoderOptions::default())?;
+            (
+                Codec::Symphonia(decoder),
+                params.sample_rate.context("no sample rate")?,
+            )
+        };
+        // Lengths count in the track's time base: samples in MP4,
+        // milliseconds in WebM.
+        let duration = match (params.n_frames, params.time_base) {
+            (Some(n), Some(base)) => Some(base.calc_time(n)).map(|t| t.seconds as f64 + t.frac),
+            (Some(n), None) => Some(n as f64 / f64::from(rate)),
+            _ => None,
+        };
         Ok(Self {
             track_id: track.id,
             time_base: params.time_base,
             format,
-            decoder,
+            codec,
             rate,
             channels,
-            samples: Vec::new(),
-            read: 0,
             frames: 0,
             duration,
-            done: false,
+            failure: None,
         })
     }
 
@@ -139,10 +192,13 @@ impl Track {
         };
         match self.format.seek(SeekMode::Accurate, to) {
             Ok(seeked) => {
-                self.decoder.reset();
-                self.samples.clear();
-                self.read = 0;
-                self.done = false;
+                match &mut self.codec {
+                    Codec::Symphonia(decoder) => decoder.reset(),
+                    Codec::Opus { decoder, skip, .. } => {
+                        let _ = decoder.reset();
+                        *skip = 0;
+                    }
+                }
                 // The format lands on a packet at or before the time asked.
                 let landed = self.time_base.map_or(seconds, |tb| {
                     let time = tb.calc_time(seeked.actual_ts);
@@ -154,66 +210,174 @@ impl Track {
         }
     }
 
-    fn refill(&mut self) -> bool {
-        while !self.done {
+    /// The next packet's audio as interleaved stereo, or `None` at the end.
+    fn next_block(&mut self) -> Option<Vec<f32>> {
+        loop {
             let packet = match self.format.next_packet() {
                 Ok(packet) => packet,
-                Err(_) => {
-                    self.done = true;
-                    break;
+                Err(DecodeError::IoError(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return None;
+                }
+                Err(error) => {
+                    self.failure = Some(error.to_string());
+                    return None;
                 }
             };
             if packet.track_id() != self.track_id {
                 continue;
             }
-            match self.decoder.decode(&packet) {
-                Ok(decoded) => {
-                    let mut buffer =
-                        SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-                    buffer.copy_interleaved_ref(decoded);
-                    self.samples.clear();
-                    self.read = 0;
-                    self.samples.extend_from_slice(buffer.samples());
-                    if !self.samples.is_empty() {
-                        return true;
+            let mut decoded = Vec::new();
+            match &mut self.codec {
+                Codec::Symphonia(decoder) => match decoder.decode(&packet) {
+                    Ok(audio) => {
+                        let mut buffer =
+                            SampleBuffer::<f32>::new(audio.capacity() as u64, *audio.spec());
+                        buffer.copy_interleaved_ref(audio);
+                        decoded.extend_from_slice(buffer.samples());
                     }
+                    // A damaged packet costs its few milliseconds, not the track.
+                    Err(DecodeError::DecodeError(_)) => continue,
+                    Err(error) => {
+                        self.failure = Some(error.to_string());
+                        return None;
+                    }
+                },
+                Codec::Opus {
+                    decoder,
+                    skip,
+                    buffer,
+                } => {
+                    let Ok(frames) = decoder.decode_float_to_slice(&packet.data, buffer, false)
+                    else {
+                        continue;
+                    };
+                    let skipped = (*skip).min(frames);
+                    *skip -= skipped;
+                    decoded.extend_from_slice(
+                        &buffer[skipped * self.channels..frames * self.channels],
+                    );
                 }
-                // A damaged packet costs its few milliseconds, not the track.
-                Err(DecodeError::DecodeError(_)) => continue,
-                Err(_) => self.done = true,
             }
+            if decoded.is_empty() {
+                continue;
+            }
+            let stereo: Vec<f32> = match self.channels {
+                2 => decoded,
+                1 => decoded.iter().flat_map(|s| [*s, *s]).collect(),
+                n => decoded.chunks(n).flat_map(|f| [f[0], f[1]]).collect(),
+            };
+            self.frames += (stereo.len() / 2) as u64;
+            return Some(stereo);
         }
-        false
-    }
-
-    fn next_frame(&mut self) -> Option<[f32; 2]> {
-        if self.read >= self.samples.len() && !self.refill() {
-            return None;
-        }
-        let frame = &self.samples[self.read..self.read + self.channels];
-        self.read += self.channels;
-        self.frames += 1;
-        Some(match frame {
-            [mono] => [*mono, *mono],
-            [left, right, ..] => [*left, *right],
-            [] => [0.0, 0.0],
-        })
     }
 }
 
-/// Lets the decoder read a shared download without copying it.
-struct ArcBytes(Arc<Vec<u8>>);
+/// How far the decoder runs ahead of playback, in packets of ~20 ms.
+const PCM_AHEAD: usize = 128;
 
-impl AsRef<[u8]> for ArcBytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
+/// Decoded audio on its way from the decoder thread to the device callback.
+struct Pcm {
+    /// Which seek this audio belongs to: older audio is dropped.
+    generation: u64,
+    /// The frame it starts at, counted from the start of the track.
+    start: u64,
+    rate: u32,
+    samples: Vec<f32>,
+}
+
+/// A decoder thread for one track. It reads the download (waiting for the
+/// parts that have not arrived; the device callback never waits) and stays
+/// a couple of seconds ahead of playback.
+struct Decoding {
+    pcm: Receiver<Pcm>,
+    seeks: Sender<f64>,
+    generation: Arc<AtomicU64>,
+    duration_ms: Arc<AtomicU64>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl Decoding {
+    fn start(source: Box<dyn MediaSource>, from: f64) -> Self {
+        let (pcm_tx, pcm) = sync_channel::<Pcm>(PCM_AHEAD);
+        let (seeks, seek_rx) = channel::<f64>();
+        let generation = Arc::new(AtomicU64::new(0));
+        let duration_ms = Arc::new(AtomicU64::new(0));
+        let failure = Arc::new(Mutex::new(None));
+        let (thread_generation, thread_duration, thread_failure) =
+            (generation.clone(), duration_ms.clone(), failure.clone());
+        let fail = move |error: String| {
+            *thread_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+        };
+        let spawned = std::thread::Builder::new()
+            .name("decoder".into())
+            .spawn(move || {
+                let mut track = match Track::open(source) {
+                    Ok(track) => track,
+                    Err(error) => return fail(format!("{error:#}")),
+                };
+                if let Some(duration) = track.duration {
+                    thread_duration.store((duration * 1000.0) as u64, Ordering::Relaxed);
+                }
+                if from > 0.0 {
+                    track.seek(from);
+                }
+                let mut current = thread_generation.load(Ordering::Acquire);
+                loop {
+                    // Only the latest of several quick seeks matters.
+                    if let Some(to) = seek_rx.try_iter().last() {
+                        current = thread_generation.load(Ordering::Acquire);
+                        track.seek(to);
+                    }
+                    let start = track.frames;
+                    let Some(samples) = track.next_block() else {
+                        if let Some(failure) = track.failure.take() {
+                            fail(failure);
+                        }
+                        return;
+                    };
+                    let pcm = Pcm {
+                        generation: current,
+                        start,
+                        rate: track.rate,
+                        samples,
+                    };
+                    if pcm_tx.send(pcm).is_err() {
+                        return; // the voice is gone
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+        }
+        Self {
+            pcm,
+            seeks,
+            generation,
+            duration_ms,
+            failure,
+        }
     }
+}
+
+enum Frame {
+    Audio([f32; 2]),
+    /// Still downloading or decoding: silence until it arrives.
+    Waiting,
+    End,
 }
 
 /// A track on its way to the speakers: resampled, with its own fade.
 pub struct Voice {
     pub id: String,
-    pub track: Track,
+    decoding: Decoding,
+    pcm: Option<Pcm>,
+    read: usize,
+    rate: u32,
+    /// Frames into the track at its own rate, or where it was asked to start.
+    frames: u64,
+    from: f64,
     gain: f32,
     target: f32,
     step: f32,
@@ -223,16 +387,24 @@ pub struct Voice {
     next: [f32; 2],
     phase: f64,
     primed: bool,
+    /// Sound has reached the device.
+    pub started: bool,
     pub finished: bool,
     /// Fading out after a skip or under a crossfade; no longer "the" track.
     pub leaving: bool,
 }
 
 impl Voice {
-    pub fn new(id: String, track: Track) -> Self {
+    /// Starts decoding `source` from `from` seconds.
+    pub fn new(id: String, source: Box<dyn MediaSource>, from: f64) -> Self {
         Self {
             id,
-            track,
+            decoding: Decoding::start(source, from),
+            pcm: None,
+            read: 0,
+            rate: 0,
+            frames: 0,
+            from,
             gain: 1.0,
             target: 1.0,
             step: 0.0,
@@ -240,9 +412,34 @@ impl Voice {
             next: [0.0; 2],
             phase: 0.0,
             primed: false,
+            started: false,
             finished: false,
             leaving: false,
         }
+    }
+
+    /// Seconds into the track.
+    pub fn position(&self) -> f64 {
+        if self.rate == 0 {
+            self.from
+        } else {
+            self.frames as f64 / f64::from(self.rate)
+        }
+    }
+
+    /// The track's length as its file tells it, once the decoder has read it.
+    pub fn duration(&self) -> Option<f64> {
+        let ms = self.decoding.duration_ms.load(Ordering::Relaxed);
+        (ms > 0).then(|| ms as f64 / 1000.0)
+    }
+
+    /// Why the track could not play, if it could not.
+    pub fn failure(&self) -> Option<String> {
+        self.decoding
+            .failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Ramps the gain to `target` over `frames` output frames.
@@ -255,28 +452,100 @@ impl Voice {
     }
 
     pub fn seek(&mut self, seconds: f64) {
-        self.track.seek(seconds);
+        self.decoding.generation.fetch_add(1, Ordering::AcqRel);
+        let _ = self.decoding.seeks.send(seconds);
+        self.pcm = None;
+        self.read = 0;
+        self.from = seconds;
+        self.frames = (seconds * f64::from(self.rate)) as u64;
         self.primed = false;
         self.phase = 0.0;
         self.finished = false;
     }
 
-    fn sample(&mut self, ratio: f64) -> Option<[f32; 2]> {
+    /// The next frame is decoded, or the track has ended: sampling will not
+    /// wait on the decoder.
+    fn buffered(&mut self) -> bool {
+        let generation = self.decoding.generation.load(Ordering::Acquire);
+        loop {
+            if let Some(pcm) = &self.pcm
+                && self.read + 1 < pcm.samples.len()
+            {
+                return true;
+            }
+            match self.decoding.pcm.try_recv() {
+                Ok(pcm) if pcm.generation == generation => {
+                    self.rate = pcm.rate;
+                    self.read = 0;
+                    self.pcm = Some(pcm);
+                }
+                Ok(_) => {} // from before a seek
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => return true,
+            }
+        }
+    }
+
+    fn next_frame(&mut self) -> Frame {
+        let generation = self.decoding.generation.load(Ordering::Acquire);
+        loop {
+            if let Some(pcm) = &self.pcm
+                && self.read + 1 < pcm.samples.len()
+            {
+                let frame = [pcm.samples[self.read], pcm.samples[self.read + 1]];
+                self.read += 2;
+                self.frames = pcm.start + (self.read / 2) as u64;
+                return Frame::Audio(frame);
+            }
+            match self.decoding.pcm.try_recv() {
+                Ok(pcm) if pcm.generation == generation => {
+                    self.rate = pcm.rate;
+                    self.read = 0;
+                    self.pcm = Some(pcm);
+                }
+                Ok(_) => {} // from before a seek
+                Err(TryRecvError::Empty) => return Frame::Waiting,
+                Err(TryRecvError::Disconnected) => return Frame::End,
+            }
+        }
+    }
+
+    /// The next output frame at `out_rate`, `None` once the track has ended.
+    fn sample(&mut self, out_rate: u32) -> Option<[f32; 2]> {
         if !self.primed {
-            self.prev = self.track.next_frame()?;
-            self.next = self.track.next_frame().unwrap_or(self.prev);
+            match self.next_frame() {
+                Frame::Audio(frame) => self.prev = frame,
+                Frame::Waiting => return Some([0.0; 2]),
+                Frame::End => return None,
+            }
+            self.next = match self.next_frame() {
+                Frame::Audio(frame) => frame,
+                Frame::Waiting | Frame::End => self.prev,
+            };
             self.primed = true;
+            self.started = true;
         }
         let t = self.phase as f32;
         let out = [
             self.prev[0] + (self.next[0] - self.prev[0]) * t,
             self.prev[1] + (self.next[1] - self.prev[1]) * t,
         ];
+        let ratio = f64::from(self.rate) / f64::from(out_rate);
         self.phase += ratio;
         while self.phase >= 1.0 {
-            self.phase -= 1.0;
-            self.prev = self.next;
-            self.next = self.track.next_frame()?;
+            match self.next_frame() {
+                Frame::Audio(frame) => {
+                    self.phase -= 1.0;
+                    self.prev = self.next;
+                    self.next = frame;
+                }
+                // Behind the download: hold here, silent, until it catches up.
+                Frame::Waiting => {
+                    self.phase -= ratio;
+                    return Some([0.0; 2]);
+                }
+                Frame::End => return None,
+            }
         }
         if self.gain != self.target {
             self.gain = if self.gain < self.target {
@@ -435,7 +704,7 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(eq: Eq, volume: f32) -> Self {
-        let rate = 44_100;
+        let rate = OPUS_RATE;
         Self {
             rate,
             channels: 2,
@@ -472,18 +741,39 @@ impl Mixer {
     }
 
     pub fn render(&mut self, out: &mut [f32]) {
+        self.mix(out, false);
+    }
+
+    /// Like `render`, but stops where the playing track has nothing decoded
+    /// yet instead of filling in silence, and returns the frames rendered.
+    /// For an output that queues ahead, where that silence would be heard
+    /// later, as a cut.
+    pub fn render_decoded(&mut self, out: &mut [f32]) -> usize {
+        self.mix(out, true)
+    }
+
+    fn mix(&mut self, out: &mut [f32], hold: bool) -> usize {
         let channels = usize::from(self.channels);
         // Volume moves are smoothed over ~20 ms, so a drag does not crackle.
         let target = self.volume * self.volume;
         let smooth = 1.0 - (-1.0 / (0.02 * self.rate as f32)).exp();
+        let mut rendered = 0;
         for frame in out.chunks_mut(channels) {
+            if hold
+                && !self
+                    .voices
+                    .iter_mut()
+                    .all(|v| v.finished || v.leaving || v.buffered())
+            {
+                break;
+            }
+            rendered += 1;
             let mut mix = [0f32; 2];
             for voice in &mut self.voices {
                 if voice.finished {
                     continue;
                 }
-                let ratio = f64::from(voice.track.rate) / f64::from(self.rate);
-                match voice.sample(ratio) {
+                match voice.sample(self.rate) {
                     Some([l, r]) => {
                         mix[0] += l;
                         mix[1] += r;
@@ -506,6 +796,7 @@ impl Mixer {
         }
         self.voices
             .retain(|v| !(v.finished || v.leaving && v.gain == 0.0 && v.target == 0.0));
+        rendered
     }
 }
 
@@ -561,45 +852,82 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+    use crate::stream::{Download, Resolver, Ytdlp};
+    use std::time::Instant;
 
-    #[tokio::test]
+    /// Plays a voice to its end (or `limit` seconds) at 48 kHz: when the first
+    /// sound came, how much played, and the peak and RMS level.
+    fn drain(voice: &mut Voice, limit: f64) -> (Option<f64>, f64, f32, f64) {
+        let started = Instant::now();
+        let (mut first, mut frames, mut peak, mut energy) = (None, 0u64, 0f32, 0f64);
+        while frames < (limit * 48_000.0) as u64 {
+            match voice.sample(48_000) {
+                None => break,
+                Some(_) if !voice.started => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Some([l, r]) => {
+                    first.get_or_insert(started.elapsed().as_secs_f64());
+                    frames += 1;
+                    peak = peak.max(l.abs()).max(r.abs());
+                    energy += f64::from(l * l + r * r);
+                }
+            }
+        }
+        let rms = (energy / (2.0 * frames.max(1) as f64)).sqrt();
+        (first, frames as f64 / 48_000.0, peak, rms)
+    }
+
+    #[test]
     #[ignore = "downloads from YouTube"]
-    async fn downloads_decodes_and_seeks() {
+    fn streams_while_downloading_and_seeks_ahead() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let data = std::env::temp_dir().join("ytfast-test");
-        let ytdlp = crate::stream::Ytdlp::new(&data);
+        let resolver = Arc::new(Resolver::new(Arc::new(Ytdlp::new(&data)), data.clone()));
         let http = reqwest::Client::new();
-        let started = std::time::Instant::now();
-        let bytes = Arc::new(
-            crate::stream::fetch(&http, &ytdlp, "dQw4w9WgXcQ")
-                .await
-                .expect("fetch"),
+        let id = "dQw4w9WgXcQ";
+
+        let started = Instant::now();
+        let download = Download::start(
+            runtime.handle(),
+            http.clone(),
+            resolver.clone(),
+            id.into(),
+            None,
         );
+        let mut voice = Voice::new(id.into(), Box::new(download.reader()), 0.0);
+        let (first, played, peak, rms) = drain(&mut voice, 1000.0);
+        let first = first.expect("sound");
         println!(
-            "{} bytes in {:.2}s",
-            bytes.len(),
-            started.elapsed().as_secs_f32()
+            "cold: first sound after {first:.2}s, {played:.1}s played, peak {peak:.2}, rms {rms:.3}"
         );
-        let mut track = Track::open(bytes.clone()).expect("open");
+        assert!((played - 213.0).abs() < 2.0, "{played}");
+        // Music, not silence and not noise: a mastered pop track sits here.
+        assert!(
+            peak <= 1.2 && rms > 0.05 && rms < 0.6,
+            "peak {peak} rms {rms}"
+        );
+        println!("whole track in {:.2}s", started.elapsed().as_secs_f64());
+
+        // Resolved already: a second track start is the download alone.
+        let other = "4NRXx6U8ABQ";
+        let warm = Instant::now();
+        runtime
+            .block_on(resolver.resolve(other, None))
+            .expect("resolve");
+        println!("resolve took {:.2}s", warm.elapsed().as_secs_f64());
+        let download = Download::start(runtime.handle(), http, resolver, other.into(), None);
+        let mut voice = Voice::new(other.into(), Box::new(download.reader()), 150.0);
+        let (first, _, _, _) = drain(&mut voice, 1.0);
         println!(
-            "rate {} channels {} duration {:?}",
-            track.rate, track.channels, track.duration
+            "warm, at 150s: first sound after {:.2}s, now at {:.1}s",
+            first.expect("sound"),
+            voice.position()
         );
-        let mut frames = 0u64;
-        while track.next_frame().is_some() {
-            frames += 1;
-        }
-        let seconds = frames as f64 / f64::from(track.rate);
-        println!("decoded {seconds:.1}s");
-        assert!((seconds - 213.0).abs() < 2.0, "{seconds}");
-        let mut track = Track::open(bytes).expect("open");
-        track.seek(100.0);
-        println!("after seek: {:.2}s", track.position());
-        assert!((track.position() - 100.0).abs() < 1.0);
-        let mut after = 0u64;
-        while track.next_frame().is_some() {
-            after += 1;
-        }
-        let rest = after as f64 / f64::from(track.rate);
-        assert!((rest - (seconds - 100.0)).abs() < 1.5, "{rest}");
+        assert!(
+            (voice.position() - 151.0).abs() < 1.5,
+            "{}",
+            voice.position()
+        );
     }
 }

@@ -9,6 +9,10 @@ pub mod helium;
 pub mod images;
 pub mod innertube;
 pub mod lyrics;
+#[cfg(target_os = "macos")]
+pub mod mac_menu;
+#[cfg(target_os = "macos")]
+pub mod mac_output;
 pub mod model;
 pub mod player;
 pub mod queue;

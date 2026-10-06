@@ -81,6 +81,10 @@ pub enum Event {
         id: String,
         result: Result<ArtistPage>,
     },
+    ArtistSets {
+        id: String,
+        result: Result<Vec<Item>>,
+    },
     Feed {
         target: Browse,
         more: bool,
@@ -113,11 +117,31 @@ pub enum Event {
     },
     Account(Result<Option<Account>>),
     SignedIn(Result<Session>),
+    /// The stored session, read at startup.
+    SessionLoaded(Option<Session>),
+    /// Output devices as (unique ID, name).
+    Devices(Vec<(String, String)>),
+    /// The library's playlists the signed-in person owns, by browse id.
+    OwnPlaylists(std::collections::HashSet<String>),
+    AddedToPlaylist {
+        title: String,
+        result: Result<()>,
+    },
+    PlaylistDeleted {
+        id: String,
+        title: String,
+        result: Result<()>,
+    },
     Art {
         id: String,
         path: PathBuf,
     },
     Ytdlp(Result<()>),
+    /// A play was reported to the account's YouTube history.
+    History {
+        id: String,
+        result: Result<()>,
+    },
     Player(player::Event),
 }
 
@@ -144,7 +168,9 @@ impl Backend {
             .build()
             .map_err(std::io::Error::other)?;
         auth::init_store();
-        let api = Arc::new(Innertube::new(http.clone(), auth::load()));
+        // The session arrives through `load_session`: the Keychain can take
+        // seconds to answer, and the window must not wait for it.
+        let api = Arc::new(Innertube::new(http.clone(), None));
         let ytdlp = Arc::new(Ytdlp::new(&paths.data));
         let (tx, rx) = channel();
         Ok(Self {
@@ -180,6 +206,13 @@ impl Backend {
 
     pub fn events(&self) -> Vec<Event> {
         self.rx.try_iter().collect()
+    }
+
+    /// Reads the stored session off the interface thread.
+    pub fn load_session(&self) {
+        self.run(async {
+            Event::SessionLoaded(tokio::task::spawn_blocking(auth::load).await.ok().flatten())
+        });
     }
 
     pub fn sign_in(&self, browser: String) {

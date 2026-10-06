@@ -87,13 +87,13 @@ fn queue(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                     ui.add_space(4.0);
                 }
                 let playing = current == Some(at);
-                let row = widgets::track_row(ui, item, Lead::Art, playing, app.signed_in, actions);
-                if row.clicked() && !playing {
+                let row = widgets::track_row(ui, item, Lead::Art, playing, app, actions);
+                if row.play && !playing {
                     actions.push(Action::QueueJump(at));
                 }
-                if row.hovered() && !playing {
+                if row.response.hovered() && !playing {
                     let close = egui::Rect::from_center_size(
-                        row.rect.right_center() - vec2(24.0, 0.0),
+                        row.response.rect.right_center() - vec2(24.0, 0.0),
                         egui::Vec2::splat(26.0),
                     );
                     let hit = ui.interact(close, Id::new(("remove", at)), Sense::click());
@@ -120,7 +120,22 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         Some(Loadable::Loaded(Some(lyrics))) => lyrics,
         Some(Loadable::Loaded(None)) => return widgets::empty(ui, "No lyrics for this track."),
         Some(Loadable::Failed(error)) => {
-            return widgets::empty(ui, &format!("Lyrics did not load: {error}"));
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Lyrics are unavailable right now.").color(theme::SECONDARY),
+                );
+                ui.label(
+                    RichText::new(error)
+                        .font(theme::body(12.0))
+                        .color(theme::DIM),
+                );
+                ui.add_space(10.0);
+                if widgets::pill(ui, Some(Icon::Refresh), "Try again", false).clicked() {
+                    actions.push(Action::RetryLyrics);
+                }
+            });
+            return;
         }
         _ => return widgets::loading(ui),
     };

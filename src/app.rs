@@ -6,22 +6,25 @@
 //! clicked song is the playing song, a like is filled) and the backend makes
 //! it true behind it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastframe_now_playing::{self as now_playing, NowPlaying};
 
 use crate::audio::{EQ_RANGE, Eq, EqPreset};
+use crate::auth::Session;
 use crate::backend::{Backend, Event, Fill, Paths};
 use crate::images;
 use crate::lyrics;
 use crate::model::{
     Account, ArtistPage, Browse, Collection, Feed, Item, Kind, Loadable, Lyrics, Page, Rating,
-    SearchFilter, SearchResults, Watch,
+    SearchFilter, SearchResults, Shelf, Watch,
 };
 use crate::player::{self, Command, Player, TrackRef};
 use crate::queue::Repeat;
-use crate::settings::Settings;
+use crate::settings::{HomeArtist, Settings};
+use crate::stream::Resolver;
 
 pub const LIBRARY_PLAYLISTS: &str = "FEmusic_liked_playlists";
 pub const LIBRARY_ALBUMS: &str = "FEmusic_liked_albums";
@@ -34,6 +37,49 @@ const SAVE_EVERY: Duration = Duration::from_secs(2);
 const TOAST_FOR: Duration = Duration::from_secs(4);
 /// Unplayable tracks skipped in a row before playback stops trying.
 const MAX_SKIPS: u32 = 3;
+/// Seconds a track plays before it goes to the YouTube history, so a skip
+/// straight past it does not count as a listen.
+const HISTORY_AFTER: f64 = 10.0;
+/// How long the pointer rests on a track before it is resolved ahead.
+const WARM_AFTER: Duration = Duration::from_millis(150);
+/// Tracks resolved ahead when an album or playlist opens.
+const WARM_TOP: usize = 3;
+const RECENT_SEARCHES: usize = 10;
+
+/// What the menu bar's seek and volume items move by.
+#[cfg(target_os = "macos")]
+const MENU_SEEK: f64 = 10.0;
+#[cfg(target_os = "macos")]
+const MENU_VOLUME_STEP: f32 = 0.05;
+#[cfg(target_os = "macos")]
+const LIKED_MUSIC: &str = "VLLM";
+#[cfg(target_os = "macos")]
+const REPO_URL: &str = "https://github.com/mateusbadalotti/ytfast";
+
+/// Home's own sections, ordered and hidden by title like YouTube's.
+pub const HOME_PLAYLISTS: &str = "Your playlists";
+pub const HOME_SETS: &str = "Sets from your artists";
+pub const HOME_NEW: &str = "New from your artists";
+
+pub enum HomeSection<'a> {
+    Feed(&'a Shelf),
+    Playlists,
+    Sets,
+    New,
+}
+
+impl HomeSection<'_> {
+    pub fn title(&self) -> &str {
+        match self {
+            HomeSection::Feed(shelf) => &shelf.title,
+            HomeSection::Playlists => HOME_PLAYLISTS,
+            HomeSection::Sets => HOME_SETS,
+            HomeSection::New => HOME_NEW,
+        }
+    }
+}
+/// Shelf titles whose order is remembered; YouTube rotates some daily.
+const HOME_ORDER_KEPT: usize = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -75,6 +121,30 @@ pub enum Action {
     CycleRepeat,
     Rate(String, Rating),
     ToggleSide(Side),
+    /// A menu shows this track's rating: find it out if unknown.
+    WantRating(String),
+    /// The pointer is on a playable item this frame.
+    Hover(String),
+    /// A playable item was just pressed, likely the first click of a double
+    /// click: resolve it now.
+    Warm(String),
+    ForgetSearch(String),
+    ClearSearches,
+    AddHomeArtist(HomeArtist),
+    RemoveHomeArtist(String),
+    /// Looks artists up for the Home artists picker.
+    FindArtists(String),
+    /// The artist whose sets Home shows.
+    PickSetsArtist(String),
+    /// Puts a link on the clipboard.
+    CopyLink(String),
+    ShowShelf(String, bool),
+    MoveShelf {
+        title: String,
+        up: bool,
+    },
+    ResetHome,
+    RetryLyrics,
     LoadMoreHome,
     LoadMoreFeed(Browse),
     Retry(Page),
@@ -83,6 +153,18 @@ pub enum Action {
     SetBrowser(String),
     SetAutoplay(bool),
     SetCrossfade(f32),
+    SetSecondOutput(Option<String>),
+    Pin(String),
+    Unpin(String),
+    AddToPlaylist {
+        playlist: String,
+        title: String,
+        video: String,
+    },
+    /// Asks before deleting: YouTube has no undo.
+    AskDelete(Item),
+    ConfirmDelete,
+    CancelDelete,
     SetEqEnabled(bool),
     SetEqPreset(EqPreset),
     SetEqBand(usize, f32),
@@ -103,6 +185,15 @@ pub struct App {
     pub home_more: bool,
     pub collections: HashMap<String, Loadable<Collection>>,
     pub artists: HashMap<String, Loadable<ArtistPage>>,
+    /// Sets by artist id, for Home's sets section.
+    pub artist_sets: HashMap<String, Loadable<Vec<Item>>>,
+    pub sets_artist: Option<String>,
+    /// The menu bar asked for the search field.
+    pub focus_search: bool,
+    /// The volume to go back to when Mute is picked again.
+    unmute_to: f32,
+    /// What the Home artists picker last looked up.
+    pub artist_query: String,
     pub feeds: HashMap<Browse, Loadable<Feed>>,
     pub feeds_more: Option<Browse>,
     pub library: HashMap<&'static str, Loadable<Vec<Item>>>,
@@ -112,6 +203,8 @@ pub struct App {
     pub searches: HashMap<(String, SearchFilter), Loadable<SearchResults>>,
 
     pub signed_in: bool,
+    /// The stored session has been read (or found missing).
+    pub session_ready: bool,
     pub account: Option<Account>,
     pub signing_in: bool,
     pub sign_in_error: Option<String>,
@@ -125,11 +218,25 @@ pub struct App {
     queue_source: Option<String>,
     pending_play: Option<(String, bool)>,
     autoplay_for: Option<String>,
-    pub rating: Option<(String, Rating)>,
+    /// The track whose current play already went to the YouTube history.
+    history_for: Option<String>,
+    /// How the signed-in person rated tracks, as far as the app has asked.
+    pub ratings: HashMap<String, Rating>,
+    rating_requests: HashSet<String>,
+    /// The playable item under the pointer, since when, and whether it was
+    /// sent to be resolved ahead of a click.
+    hovered: Option<(String, Instant, bool)>,
+    hover_seen: bool,
     pub lyrics: HashMap<String, Loadable<Option<Lyrics>>>,
     pub side: Option<Side>,
     art_file: Option<(String, std::path::PathBuf)>,
     pub toasts: Vec<(String, Instant)>,
+    /// Output devices as (unique ID, name), read when Settings opens.
+    pub devices: Vec<(String, String)>,
+    /// Library playlists the signed-in person owns, by browse id.
+    pub own_playlists: HashSet<String>,
+    /// The playlist waiting for a confirmed delete.
+    pub deleting: Option<Item>,
     pub actions: Vec<Action>,
 }
 
@@ -137,6 +244,14 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = cc.egui_ctx.clone();
         crate::theme::install(&ctx);
+        // Built once, before the first frame; a pick wakes the loop so it is
+        // not held until the next repaint.
+        #[cfg(target_os = "macos")]
+        {
+            crate::mac_menu::init();
+            let waker = ctx.clone();
+            crate::mac_menu::set_waker(move || waker.request_repaint());
+        }
         let paths = Paths::new();
         let settings = Settings::load(&paths.state);
         let backend = match Backend::new(ctx.clone(), paths) {
@@ -148,10 +263,17 @@ impl App {
             backend.handle(),
         )));
         let emit = backend.emitter();
+        let fetcher = player::Fetcher {
+            http: backend.http.clone(),
+            resolver: Arc::new(Resolver::new(
+                backend.ytdlp.clone(),
+                backend.paths.cache.clone(),
+            )),
+            api: backend.api.clone(),
+        };
         let player = Player::start(
             backend.handle(),
-            backend.http.clone(),
-            backend.ytdlp.clone(),
+            fetcher,
             Eq {
                 enabled: settings.eq_enabled,
                 gains: settings.eq_gains(),
@@ -166,8 +288,10 @@ impl App {
             wake.request_repaint()
         });
 
-        let mut app = Self {
-            signed_in: backend.api.signed_in(),
+        let unmute_to = settings.volume;
+        let app = Self {
+            signed_in: false,
+            session_ready: false,
             backend,
             player,
             controls: Some(controls),
@@ -181,6 +305,11 @@ impl App {
             home_more: false,
             collections: HashMap::new(),
             artists: HashMap::new(),
+            artist_sets: HashMap::new(),
+            sets_artist: None,
+            focus_search: false,
+            unmute_to,
+            artist_query: String::new(),
             feeds: HashMap::new(),
             feeds_more: None,
             library: HashMap::new(),
@@ -199,31 +328,50 @@ impl App {
             queue_source: None,
             pending_play: None,
             autoplay_for: None,
-            rating: None,
+            history_for: None,
+            ratings: HashMap::new(),
+            rating_requests: HashSet::new(),
+            hovered: None,
+            hover_seen: false,
             lyrics: HashMap::new(),
             side: None,
             art_file: None,
             toasts: Vec::new(),
+            devices: Vec::new(),
+            own_playlists: HashSet::new(),
+            deleting: None,
             actions: Vec::new(),
         };
-        app.ensure_loaded(&Page::Home);
-        if app.signed_in {
-            app.load_account();
+        if let Some(device) = app.settings.second_output.clone() {
+            app.player.send(Command::SecondOutput(Some(device)));
         }
+        app.backend.load_session();
         let (http, ytdlp) = (app.backend.http.clone(), app.backend.ytdlp.clone());
         app.backend
             .run(async move { Event::Ytdlp(ytdlp.ensure(&http).await) });
-        // Back where the last run left off, paused.
-        if let Some(track) = app.current_ref() {
-            let from = app.settings.position;
-            app.player.send(Command::Play {
+        app
+    }
+
+    /// What starts once it is known whether there is a session: the home
+    /// feed and library for that account, and the track the last run left
+    /// paused, resolved with the session for the best quality.
+    fn session_loaded(&mut self, session: Option<Session>) {
+        self.session_ready = true;
+        self.signed_in = session.is_some();
+        self.backend.api.set_session(session);
+        self.ensure_loaded(&self.page.clone());
+        if self.signed_in {
+            self.load_account();
+        }
+        if let Some(track) = self.current_ref() {
+            let from = self.settings.position;
+            self.player.send(Command::Play {
                 track,
                 from,
                 paused: true,
             });
-            app.track_changed();
+            self.track_changed();
         }
-        app
     }
 
     pub fn current(&self) -> Option<&Item> {
@@ -351,7 +499,11 @@ impl App {
     }
 
     fn load_search(&mut self) {
-        let key = (self.search_query.clone(), self.search_filter);
+        self.search_for(self.search_query.clone(), self.search_filter);
+    }
+
+    fn search_for(&mut self, query: String, filter: SearchFilter) {
+        let key = (query, filter);
         if key.0.trim().is_empty()
             || self
                 .searches
@@ -374,26 +526,32 @@ impl App {
     }
 
     pub fn ensure_loaded(&mut self, page: &Page) {
+        if *page == Page::Home {
+            self.load_home_extras();
+        }
+        if *page == Page::Settings {
+            self.load_whole_home();
+        }
         match page {
-            Page::Home if self.home.needs_load() => self.load_home(false),
+            // The feed is the account's: it waits for the stored session.
+            Page::Home if self.home.needs_load() && self.session_ready => self.load_home(false),
             Page::Album(id) if !self.collections.contains_key(id) => self.load_collection(id, true),
             Page::Playlist(id) if !self.collections.contains_key(id) => {
                 self.load_collection(id, false)
             }
-            Page::Artist(id) if !self.artists.contains_key(id) => {
-                self.artists.insert(id.clone(), Loadable::Loading);
-                let (api, id) = (self.backend.api.clone(), id.clone());
-                self.backend.run(async move {
-                    Event::Artist {
-                        result: api.artist(&id).await,
-                        id,
-                    }
-                });
-            }
+            Page::Artist(id) if !self.artists.contains_key(id) => self.load_artist(id),
             Page::Browse(target) if !self.feeds.contains_key(target) => {
                 self.load_feed(target.clone(), false)
             }
             Page::Search => self.load_search(),
+            #[cfg(target_os = "macos")]
+            Page::Settings => {
+                self.backend.run(async {
+                    let devices =
+                        tokio::task::spawn_blocking(crate::mac_output::output_devices).await;
+                    Event::Devices(devices.unwrap_or_default())
+                });
+            }
             Page::Library if self.signed_in => {
                 for id in [LIBRARY_PLAYLISTS, LIBRARY_ALBUMS, LIBRARY_ARTISTS] {
                     if self
@@ -407,6 +565,48 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Finds which of the library's playlists are the account's own, four
+    /// at a time: only those can be added to or deleted.
+    fn check_ownership(&mut self, items: &[Item]) {
+        let candidates: Vec<String> = items
+            .iter()
+            .filter(|item| item.kind == Kind::Playlist && item.id.starts_with("VLPL"))
+            .map(|item| item.id.clone())
+            .collect();
+        let api = self.backend.api.clone();
+        self.backend.run(async move {
+            use futures_util::StreamExt;
+            let owned = futures_util::stream::iter(candidates)
+                .map(|id| {
+                    let api = api.clone();
+                    async move { api.owns_playlist(&id).await.unwrap_or(false).then_some(id) }
+                })
+                .buffer_unordered(4)
+                .filter_map(|owned| async move { owned })
+                .collect()
+                .await;
+            Event::OwnPlaylists(owned)
+        });
+    }
+
+    pub fn rating_of(&self, id: &str) -> Option<Rating> {
+        self.ratings.get(id).copied()
+    }
+
+    /// Asks how a track is rated, once at a time, when signed in.
+    fn request_rating(&mut self, id: String) {
+        if !self.signed_in || !self.rating_requests.insert(id.clone()) {
+            return;
+        }
+        let api = self.backend.api.clone();
+        self.backend.run(async move {
+            Event::Rating {
+                result: api.rating(&id).await,
+                id,
+            }
+        });
     }
 
     fn want_lyrics(&mut self) {
@@ -447,20 +647,14 @@ impl App {
     /// Everything that follows the current track changing.
     fn track_changed(&mut self) {
         self.dirty = true;
+        self.history_for = None;
         self.sync_next();
         let Some(track) = self.current().cloned() else {
             return;
         };
-        self.rating = None;
-        if self.signed_in {
-            let (api, id) = (self.backend.api.clone(), track.id.clone());
-            self.backend.run(async move {
-                Event::Rating {
-                    result: api.rating(&id).await,
-                    id,
-                }
-            });
-        }
+        // Asked again each time it plays: it may have changed elsewhere.
+        self.rating_requests.remove(&track.id);
+        self.request_rating(track.id.clone());
         if let Some(url) = images::art_url(&track.thumbnails, 544) {
             self.backend.save_art(track.id.clone(), url);
         }
@@ -513,7 +707,7 @@ impl App {
     // -----------------------------------------------------------------------
     // Actions
 
-    fn apply(&mut self, action: Action) {
+    fn apply(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::Open(page) => self.open(page),
             Action::OpenItem(item) => self.open_item(item),
@@ -534,6 +728,7 @@ impl App {
             Action::Search(query) => {
                 self.search_query = query.trim().to_string();
                 self.search_text = self.search_query.clone();
+                self.remember_search();
                 self.open(Page::Search);
                 self.load_search();
             }
@@ -641,9 +836,7 @@ impl App {
                 self.queue_edited();
             }
             Action::Rate(id, rating) => {
-                if self.current().is_some_and(|t| t.id == id) {
-                    self.rating = Some((id.clone(), rating));
-                }
+                self.ratings.insert(id.clone(), rating);
                 let api = self.backend.api.clone();
                 self.backend.run(async move {
                     Event::Rated {
@@ -659,6 +852,79 @@ impl App {
                     Some(side)
                 };
                 self.want_lyrics();
+            }
+            Action::RetryLyrics => {
+                if let Some(id) = self.current().map(|t| t.id.clone()) {
+                    self.lyrics.remove(&id);
+                }
+                self.want_lyrics();
+            }
+            Action::WantRating(id) => {
+                if !self.ratings.contains_key(&id) {
+                    self.request_rating(id);
+                }
+            }
+            Action::Hover(id) => {
+                self.hover_seen = true;
+                if self
+                    .hovered
+                    .as_ref()
+                    .is_none_or(|(hovered, _, _)| *hovered != id)
+                {
+                    self.hovered = Some((id, Instant::now(), false));
+                }
+            }
+            Action::Warm(id) => self.player.send(Command::Warm(id)),
+            Action::ForgetSearch(query) => {
+                self.settings.recent_searches.retain(|q| *q != query);
+                self.dirty = true;
+            }
+            Action::ClearSearches => {
+                self.settings.recent_searches.clear();
+                self.dirty = true;
+            }
+            Action::CopyLink(link) => {
+                ctx.copy_text(link);
+                self.toast("Link copied");
+            }
+            Action::AddHomeArtist(artist) => {
+                if !self.settings.home_artists.iter().any(|a| a.id == artist.id) {
+                    self.toast(format!("{} is on Home now", artist.name));
+                    self.settings.home_artists.push(artist);
+                    self.dirty = true;
+                    self.load_home_extras();
+                }
+            }
+            Action::RemoveHomeArtist(id) => {
+                self.settings.home_artists.retain(|a| a.id != id);
+                if self.sets_artist.as_ref() == Some(&id) {
+                    self.sets_artist = None;
+                }
+                self.dirty = true;
+                self.load_home_extras();
+            }
+            Action::FindArtists(query) => {
+                self.artist_query = query.trim().to_string();
+                self.search_for(self.artist_query.clone(), SearchFilter::Artists);
+            }
+            Action::PickSetsArtist(id) => {
+                self.sets_artist = Some(id);
+                self.load_home_extras();
+            }
+            Action::ShowShelf(title, shown) => {
+                let hidden = &mut self.settings.home_hidden;
+                hidden.retain(|t| *t != title);
+                if !shown {
+                    hidden.push(title);
+                }
+                self.dirty = true;
+                self.load_home_extras();
+            }
+            Action::MoveShelf { title, up } => self.move_shelf(&title, up),
+            Action::ResetHome => {
+                self.settings.home_order.clear();
+                self.settings.home_hidden.clear();
+                self.dirty = true;
             }
             Action::LoadMoreHome => {
                 if !self.home_more {
@@ -697,7 +963,8 @@ impl App {
                 self.signed_in = false;
                 self.account = None;
                 self.library.clear();
-                self.rating = None;
+                self.ratings.clear();
+                self.rating_requests.clear();
                 self.home = Loadable::NotLoaded;
                 self.ensure_loaded(&Page::Home);
             }
@@ -709,6 +976,50 @@ impl App {
                 self.settings.autoplay = on;
                 self.dirty = true;
                 self.maybe_autoplay();
+            }
+            Action::Pin(id) => {
+                if !self.settings.pinned.contains(&id) {
+                    self.settings.pinned.push(id);
+                    self.dirty = true;
+                }
+            }
+            Action::Unpin(id) => {
+                self.settings.pinned.retain(|p| *p != id);
+                self.dirty = true;
+            }
+            Action::AddToPlaylist {
+                playlist,
+                title,
+                video,
+            } => {
+                self.toast(format!("Adding to “{title}”…"));
+                // Its page shows the new track when opened next.
+                self.collections.remove(&playlist_key(&playlist));
+                let api = self.backend.api.clone();
+                self.backend.run(async move {
+                    let result = api.add_to_playlist(&playlist, &video).await;
+                    Event::AddedToPlaylist { title, result }
+                });
+            }
+            Action::AskDelete(item) => self.deleting = Some(item),
+            Action::CancelDelete => self.deleting = None,
+            Action::ConfirmDelete => {
+                if let Some(item) = self.deleting.take() {
+                    let api = self.backend.api.clone();
+                    self.backend.run(async move {
+                        let result = api.delete_playlist(&item.id).await;
+                        Event::PlaylistDeleted {
+                            id: item.id,
+                            title: item.title,
+                            result,
+                        }
+                    });
+                }
+            }
+            Action::SetSecondOutput(device) => {
+                self.settings.second_output = device.clone();
+                self.player.send(Command::SecondOutput(device));
+                self.dirty = true;
             }
             Action::SetCrossfade(seconds) => {
                 self.settings.crossfade = seconds;
@@ -780,6 +1091,234 @@ impl App {
             self.forward.clear();
         }
         self.ensure_loaded(&page);
+        if let Page::Album(id) | Page::Playlist(id) = &page
+            && let Some(collection) = self.collections.get(id).and_then(Loadable::get)
+        {
+            self.warm_top(&collection.tracks);
+        }
+    }
+
+    /// Home's sections in the order set for them, hidden ones included: the
+    /// app's own first, then YouTube's; the ones never ordered keep that
+    /// order, after the rest.
+    pub fn home_sections(&self) -> Vec<HomeSection<'_>> {
+        let feed = self
+            .home
+            .get()
+            .map(|f| f.shelves.as_slice())
+            .unwrap_or_default();
+        let mut sections: Vec<HomeSection> =
+            [HomeSection::Playlists, HomeSection::Sets, HomeSection::New]
+                .into_iter()
+                .chain(feed.iter().map(HomeSection::Feed))
+                .collect();
+        let order = &self.settings.home_order;
+        sections.sort_by_key(|s| {
+            order
+                .iter()
+                .position(|t| t == s.title())
+                .unwrap_or(usize::MAX)
+        });
+        sections
+    }
+
+    /// A pick from the macOS menu bar, as the action it stands for.
+    #[cfg(target_os = "macos")]
+    fn menu_command(&mut self, command: crate::mac_menu::MenuCommand, ctx: &egui::Context) {
+        use crate::mac_menu::MenuCommand;
+        let volume = self.settings.volume;
+        let action = match command {
+            MenuCommand::PlayPause => Action::TogglePlay,
+            MenuCommand::Next => Action::Next,
+            MenuCommand::Previous => Action::Previous,
+            MenuCommand::SeekForward => {
+                let end = self.length().unwrap_or(f64::MAX);
+                Action::Seek((self.position() + MENU_SEEK).min(end))
+            }
+            MenuCommand::SeekBackward => Action::Seek((self.position() - MENU_SEEK).max(0.0)),
+            MenuCommand::ToggleShuffle => Action::ToggleShuffle,
+            MenuCommand::CycleRepeat => Action::CycleRepeat,
+            MenuCommand::Like => {
+                let Some(track) = self.current().filter(|_| self.signed_in) else {
+                    return;
+                };
+                let next = if self.rating_of(&track.id) == Some(Rating::Like) {
+                    Rating::None
+                } else {
+                    Rating::Like
+                };
+                Action::Rate(track.id.clone(), next)
+            }
+            MenuCommand::VolumeUp => Action::Volume(volume + MENU_VOLUME_STEP),
+            MenuCommand::VolumeDown => Action::Volume(volume - MENU_VOLUME_STEP),
+            MenuCommand::ToggleMute if volume > 0.0 => {
+                self.unmute_to = volume;
+                Action::Volume(0.0)
+            }
+            MenuCommand::ToggleMute => Action::Volume(self.unmute_to),
+            MenuCommand::Back => Action::Back,
+            MenuCommand::Forward => Action::Forward,
+            MenuCommand::Home => Action::Open(Page::Home),
+            MenuCommand::Library => Action::Open(Page::Library),
+            MenuCommand::LikedMusic => Action::Open(Page::Playlist(LIKED_MUSIC.to_string())),
+            MenuCommand::Settings => Action::Open(Page::Settings),
+            MenuCommand::Queue => Action::ToggleSide(Side::Queue),
+            MenuCommand::Lyrics => Action::ToggleSide(Side::Lyrics),
+            MenuCommand::Search => {
+                self.focus_search = true;
+                return;
+            }
+            MenuCommand::OpenRepo => {
+                ctx.open_url(egui::OpenUrl::new_tab(REPO_URL));
+                return;
+            }
+            // Editing goes through egui, which owns the text field and the
+            // clipboard.
+            MenuCommand::Cut => return ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
+            MenuCommand::Copy => return ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
+            MenuCommand::Paste => {
+                return ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            MenuCommand::SelectAll => {
+                ctx.input_mut(|input| {
+                    input.events.push(egui::Event::Key {
+                        key: egui::Key::A,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    });
+                });
+                return;
+            }
+        };
+        self.actions.push(action);
+    }
+
+    /// Every page of Home's feed, one after the other, while Settings lists
+    /// its sections to arrange.
+    fn load_whole_home(&mut self) {
+        if self.page != Page::Settings || !self.session_ready || self.home_more {
+            return;
+        }
+        if self.home.needs_load() {
+            self.load_home(false);
+        } else if self.home.get().is_some_and(|f| f.continuation.is_some()) {
+            self.load_home(true);
+        }
+    }
+
+    /// What Home's own sections need: each picked artist's page for the
+    /// new releases, and the chosen artist's sets.
+    fn load_home_extras(&mut self) {
+        if self.shows_shelf(HOME_NEW) {
+            let ids: Vec<String> = self
+                .settings
+                .home_artists
+                .iter()
+                .map(|a| a.id.clone())
+                .collect();
+            for id in ids {
+                if !self.artists.contains_key(&id) {
+                    self.load_artist(&id);
+                }
+            }
+        }
+        if self.shows_shelf(HOME_SETS)
+            && let Some(artist) = self.sets_artist_now().cloned()
+            && !self.artist_sets.contains_key(&artist.id)
+        {
+            self.artist_sets
+                .insert(artist.id.clone(), Loadable::Loading);
+            let api = self.backend.api.clone();
+            self.backend.run(async move {
+                Event::ArtistSets {
+                    result: api.artist_sets(&artist.name).await,
+                    id: artist.id,
+                }
+            });
+        }
+    }
+
+    /// The artist whose sets show: the one picked, else the first.
+    pub fn sets_artist_now(&self) -> Option<&HomeArtist> {
+        let artists = &self.settings.home_artists;
+        artists
+            .iter()
+            .find(|a| Some(&a.id) == self.sets_artist.as_ref())
+            .or(artists.first())
+    }
+
+    fn load_artist(&mut self, id: &str) {
+        self.artists.insert(id.to_string(), Loadable::Loading);
+        let (api, id) = (self.backend.api.clone(), id.to_string());
+        self.backend.run(async move {
+            Event::Artist {
+                result: api.artist(&id).await,
+                id,
+            }
+        });
+    }
+
+    pub fn shows_shelf(&self, title: &str) -> bool {
+        !self.settings.home_hidden.iter().any(|t| t == title)
+    }
+
+    /// Swaps a shelf with its neighbour. The whole order shown is kept, and
+    /// after it the shelves not on Home today, which come back in place.
+    fn move_shelf(&mut self, title: &str, up: bool) {
+        let mut titles: Vec<String> = Vec::new();
+        for section in self.home_sections() {
+            if !titles.iter().any(|t| t == section.title()) {
+                titles.push(section.title().to_string());
+            }
+        }
+        let Some(at) = titles.iter().position(|t| t == title) else {
+            return;
+        };
+        let to = if up { at.checked_sub(1) } else { Some(at + 1) };
+        let Some(to) = to.filter(|&to| to < titles.len()) else {
+            return;
+        };
+        titles.swap(at, to);
+        let absent: Vec<String> = self
+            .settings
+            .home_order
+            .iter()
+            .filter(|t| !titles.contains(t))
+            .cloned()
+            .collect();
+        titles.extend(absent);
+        titles.truncate(HOME_ORDER_KEPT);
+        self.settings.home_order = titles;
+        self.dirty = true;
+    }
+
+    /// Puts the search just run at the top of the recent ones, once.
+    fn remember_search(&mut self) {
+        let query = &self.search_query;
+        if query.is_empty() {
+            return;
+        }
+        let recent = &mut self.settings.recent_searches;
+        recent.retain(|q| q.to_lowercase() != query.to_lowercase());
+        recent.insert(0, query.clone());
+        recent.truncate(RECENT_SEARCHES);
+        self.dirty = true;
+    }
+
+    /// Resolves the first tracks of a list just opened, the likeliest played.
+    fn warm_top(&self, tracks: &[Item]) {
+        let top: Vec<&Item> = tracks
+            .iter()
+            .filter(|t| t.is_playable())
+            .take(WARM_TOP)
+            .collect();
+        // The newest ask is resolved first: sent last to first, the first
+        // track is ready soonest.
+        for track in top.into_iter().rev() {
+            self.player.send(Command::Warm(track.id.clone()));
+        }
     }
 
     fn open_item(&mut self, item: Item) {
@@ -847,6 +1386,7 @@ impl App {
                 } else {
                     self.home = Loadable::from_result(result);
                 }
+                self.load_whole_home();
             }
             Event::Collection { id, result } => {
                 let loaded = Loadable::from_result(result);
@@ -857,6 +1397,8 @@ impl App {
                     if let Some((_, shuffle)) = self.pending_play.take_if(|(p, _)| *p == id) {
                         let tracks = collection.tracks.clone();
                         self.play_collection(tracks, shuffle, id.clone());
+                    } else if matches!(&self.page, Page::Album(p) | Page::Playlist(p) if *p == id) {
+                        self.warm_top(&collection.tracks);
                     }
                 }
                 self.collections.insert(id, loaded);
@@ -899,6 +1441,9 @@ impl App {
             Event::Artist { id, result } => {
                 self.artists.insert(id, Loadable::from_result(result));
             }
+            Event::ArtistSets { id, result } => {
+                self.artist_sets.insert(id, Loadable::from_result(result));
+            }
             Event::Feed {
                 target,
                 more,
@@ -928,27 +1473,58 @@ impl App {
                     .insert((query, filter), Loadable::from_result(result));
             }
             Event::Library { browse_id, result } => {
+                if browse_id == LIBRARY_PLAYLISTS
+                    && let Ok(items) = &result
+                {
+                    self.check_ownership(items);
+                }
                 self.library
                     .insert(browse_id, Loadable::from_result(result));
             }
-            Event::Queue { fill, result } => self.queue_filled(fill, result),
-            Event::Rating { id, result } => match result {
-                Ok(rating) if self.current().is_some_and(|t| t.id == id) => {
-                    self.rating = Some((id, rating))
-                }
-                Ok(_) => {}
-                Err(error) => log::warn!("rating: {error:#}"),
+            Event::OwnPlaylists(owned) => {
+                log::info!(
+                    "{} of the library's playlists are the account's own",
+                    owned.len()
+                );
+                self.own_playlists = owned;
+            }
+            Event::AddedToPlaylist { title, result } => match result {
+                Ok(()) => self.toast(format!("Added to “{title}”")),
+                Err(error) => self.toast(format!("Could not add to “{title}”: {error:#}")),
             },
+            Event::PlaylistDeleted { id, title, result } => match result {
+                Ok(()) => {
+                    self.toast(format!("Deleted “{title}”"));
+                    if let Some(items) = self
+                        .library
+                        .get_mut(LIBRARY_PLAYLISTS)
+                        .and_then(Loadable::get_mut)
+                    {
+                        items.retain(|item| item.id != id);
+                    }
+                    self.own_playlists.remove(&id);
+                    self.settings.pinned.retain(|p| *p != id);
+                    self.collections.remove(&id);
+                    if self.page == Page::Playlist(id) {
+                        self.open(Page::Library);
+                    }
+                    self.dirty = true;
+                }
+                Err(error) => self.toast(format!("Could not delete “{title}”: {error:#}")),
+            },
+            Event::Queue { fill, result } => self.queue_filled(fill, result),
+            Event::Rating { id, result } => {
+                self.rating_requests.remove(&id);
+                match result {
+                    Ok(rating) => _ = self.ratings.insert(id, rating),
+                    Err(error) => log::warn!("rating: {error:#}"),
+                }
+            }
             Event::Rated { id, result } => {
                 if let Err(error) = result {
                     self.toast(format!("Could not save that rating: {error:#}"));
-                    let api = self.backend.api.clone();
-                    self.backend.run(async move {
-                        Event::Rating {
-                            result: api.rating(&id).await,
-                            id,
-                        }
-                    });
+                    self.rating_requests.remove(&id);
+                    self.request_rating(id);
                 } else {
                     // Liked songs is a playlist the server rebuilds: load it again.
                     self.collections.remove(LIKED_SONGS);
@@ -986,6 +1562,12 @@ impl App {
                     log::warn!("yt-dlp update: {error:#}");
                 }
             }
+            Event::History { id, result } => match result {
+                Ok(()) => log::info!("{id}: added to the YouTube history"),
+                Err(error) => log::warn!("{id}: not added to the YouTube history: {error:#}"),
+            },
+            Event::SessionLoaded(session) => self.session_loaded(session),
+            Event::Devices(devices) => self.devices = devices,
             Event::Player(event) => self.player_event(event),
         }
     }
@@ -1059,6 +1641,50 @@ impl App {
                 }
             }
         }
+    }
+
+    /// A track the pointer rests on is resolved ahead, so a double click
+    /// starts it in a fraction of a second.
+    fn warm_hovered(&mut self, ctx: &egui::Context) {
+        if !self.hover_seen {
+            self.hovered = None;
+            return;
+        }
+        let Some((id, since, sent)) = &mut self.hovered else {
+            return;
+        };
+        if *sent {
+            return;
+        }
+        let waited = since.elapsed();
+        if waited < WARM_AFTER {
+            ctx.request_repaint_after(WARM_AFTER - waited);
+            return;
+        }
+        *sent = true;
+        self.player.send(Command::Warm(id.clone()));
+    }
+
+    /// Sends the current play to the YouTube history once it has really
+    /// been listened to.
+    fn report_history(&mut self) {
+        if !self.signed_in || !self.playing || self.loading || self.position() < HISTORY_AFTER {
+            return;
+        }
+        let Some(id) = self.current().map(|t| t.id.clone()) else {
+            return;
+        };
+        if self.history_for.as_ref() == Some(&id) {
+            return;
+        }
+        self.history_for = Some(id.clone());
+        let api = self.backend.api.clone();
+        self.backend.run(async move {
+            Event::History {
+                result: api.report_play(&id).await,
+                id,
+            }
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1153,6 +1779,15 @@ impl App {
     }
 }
 
+/// The key a playlist's page is filed under: its browse id.
+fn playlist_key(id: &str) -> String {
+    if id.starts_with("VL") {
+        id.to_string()
+    } else {
+        format!("VL{id}")
+    }
+}
+
 fn track_ref(item: &Item) -> TrackRef {
     TrackRef {
         id: item.id.clone(),
@@ -1166,7 +1801,12 @@ impl eframe::App for App {
         for event in self.backend.events() {
             self.handle(event);
         }
+        #[cfg(target_os = "macos")]
+        for command in crate::mac_menu::drain() {
+            self.menu_command(command, &ctx);
+        }
         self.sync_controls(&ctx);
+        self.report_history();
         let typing = ctx.memory(|m| m.focused().is_some());
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.actions.push(Action::TogglePlay);
@@ -1174,9 +1814,11 @@ impl eframe::App for App {
 
         crate::ui::show(self, ui);
 
+        self.hover_seen = false;
         for action in std::mem::take(&mut self.actions) {
-            self.apply(action);
+            self.apply(action, &ctx);
         }
+        self.warm_hovered(&ctx);
         let now = Instant::now();
         self.toasts.retain(|(_, until)| *until > now);
         if self.dirty && self.saved_at.elapsed() > SAVE_EVERY {

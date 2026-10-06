@@ -10,14 +10,19 @@ mod side;
 mod sidebar;
 pub mod widgets;
 
-use egui::{Align, Frame, Layout, Margin, RichText, Ui, vec2};
+use egui::{Align, Frame, Id, Layout, Margin, Rect, RichText, Sense, Ui, ViewportCommand, vec2};
 
 use crate::app::{Action, App};
-use crate::model::Page;
+use crate::model::{Item, Page};
 use crate::theme::{self, Icon};
+
+const DIALOG_WIDTH: f32 = 360.0;
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let mut actions = Vec::new();
+    if cfg!(target_os = "macos") {
+        drag_strip(ui);
+    }
     sidebar::show(ui, app, &mut actions);
     player_bar::show(ui, app, &mut actions);
     if let Some(side) = app.side {
@@ -61,8 +66,28 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         });
                 });
         });
+    if let Some(item) = &app.deleting {
+        confirm_delete(ui, item, &mut actions);
+    }
     toasts(ui, app);
     app.actions.extend(actions);
+}
+
+/// Without a title bar, the empty top of the window moves it, and a double
+/// click zooms it. Interacted first, so the buttons and the search field
+/// drawn over it keep their clicks.
+fn drag_strip(ui: &mut Ui) {
+    let area = ui.max_rect();
+    let strip = Rect::from_min_size(area.min, vec2(area.width(), theme::DRAG_STRIP));
+    let response = ui.interact(strip, Id::new("drag-strip"), Sense::click_and_drag());
+    if response.drag_started() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+    }
+    if response.double_clicked() {
+        let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(ViewportCommand::Maximized(!zoomed));
+    }
 }
 
 /// Back, forward and the search field.
@@ -112,18 +137,62 @@ fn topbar(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
                             {
                                 actions.push(Action::Search(app.search_text.clone()));
                             }
-                            if ui.input_mut(|i| {
-                                i.consume_shortcut(&egui::KeyboardShortcut::new(
-                                    egui::Modifiers::COMMAND,
-                                    egui::Key::F,
-                                ))
-                            }) {
+                            // On macOS the menu bar's Search takes ⌘F first.
+                            let asked = std::mem::take(&mut app.focus_search);
+                            if asked
+                                || ui.input_mut(|i| {
+                                    i.consume_shortcut(&egui::KeyboardShortcut::new(
+                                        egui::Modifiers::COMMAND,
+                                        egui::Key::F,
+                                    ))
+                                })
+                            {
                                 response.request_focus();
                             }
                         });
                     });
             });
         });
+}
+
+fn confirm_delete(ui: &mut Ui, item: &Item, actions: &mut Vec<Action>) {
+    let mut confirmed = false;
+    let modal = egui::Modal::new(Id::new("confirm-delete"))
+        .frame(
+            Frame::new()
+                .fill(theme::RAISED)
+                .corner_radius(14.0)
+                .inner_margin(22),
+        )
+        .show(ui.ctx(), |ui| {
+            ui.set_width(DIALOG_WIDTH);
+            ui.label(
+                RichText::new("Delete playlist?")
+                    .font(theme::display(20.0))
+                    .color(theme::TEXT),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!(
+                    "“{}” will be deleted from your YouTube Music library. This can't be undone.",
+                    item.title
+                ))
+                .color(theme::SECONDARY),
+            );
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                confirmed = widgets::pill(ui, Some(Icon::Trash), "Delete", true).clicked();
+                if widgets::pill(ui, None, "Cancel", false).clicked() {
+                    actions.push(Action::CancelDelete);
+                }
+            });
+        });
+    if confirmed {
+        actions.push(Action::ConfirmDelete);
+    } else if modal.should_close() {
+        // Escape or a click outside.
+        actions.push(Action::CancelDelete);
+    }
 }
 
 fn toasts(ui: &mut Ui, app: &App) {

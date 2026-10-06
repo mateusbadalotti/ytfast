@@ -24,6 +24,21 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb
 /// A runaway guard for paged library shelves (~25 rows a page).
 const MAX_PAGES: usize = 40;
 
+/// youtube.com's own client, for the one question YouTube Music cannot
+/// answer: its search rows carry no upload date and it cannot sort by one.
+const WEB_API: &str = "https://www.youtube.com/youtubei/v1";
+const WEB_CLIENT_VERSION: &str = "2.20260901.00.00";
+/// youtube.com's "Sort by: Upload date", as its own menu sends it.
+const SORT_BY_DATE: &str = "CAI%3D";
+
+/// The shortest video taken for a set: singles and teasers run three or
+/// four minutes, interviews twenty, sets from about an hour.
+const MIN_SET_SECONDS: u32 = 30 * 60;
+/// The name alone finds an artist's releases; with these words attached it
+/// finds their sets, which the bare name buries.
+const SET_QUERIES: [&str; 5] = ["", " set", " live", " mix", " b2b"];
+const SETS_KEPT: usize = 40;
+
 /// YouTube Music's own generated playlists, not ones the person made or saved.
 const HIDDEN_PLAYLISTS: [&str; 1] = ["episodes for later"];
 
@@ -33,6 +48,9 @@ pub struct Innertube {
     /// `responseContext.visitorData`, echoed back so YouTube treats the app
     /// as a returning visitor.
     visitor: Mutex<Option<String>>,
+    /// The player script's signature timestamp, which `/player` wants
+    /// before it answers with anything playable. Read once per run.
+    signature: Mutex<Option<u64>>,
 }
 
 impl Innertube {
@@ -41,11 +59,32 @@ impl Innertube {
             http,
             session: RwLock::new(session),
             visitor: Mutex::new(None),
+            signature: Mutex::new(None),
         }
+    }
+
+    /// Adds the session's cookies and signature to a request. Returns
+    /// whether there was a session to add.
+    fn authorized(&self, mut request: reqwest::RequestBuilder) -> (reqwest::RequestBuilder, bool) {
+        let session = self.session();
+        if let Some(session) = &session {
+            request = request.header(COOKIE, session.header());
+            if let Some(authorization) = session.authorization() {
+                request = request.header(AUTHORIZATION, authorization);
+            }
+        }
+        (request, session.is_some())
     }
 
     pub fn set_session(&self, session: Option<Session>) {
         *self.session.write().unwrap_or_else(|e| e.into_inner()) = session;
+    }
+
+    pub fn session(&self) -> Option<Session> {
+        self.session
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn signed_in(&self) -> bool {
@@ -94,22 +133,12 @@ impl Innertube {
         if let Some(visitor) = &visitor {
             request = request.header("X-Goog-Visitor-Id", visitor);
         }
-        let session = self
-            .session
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(session) = &session {
-            request = request.header(COOKIE, session.header());
-            if let Some(authorization) = session.authorization() {
-                request = request.header(AUTHORIZATION, authorization);
-            }
-        }
+        let (request, signed_in) = self.authorized(request);
         let response = request
             .send()
             .await
             .with_context(|| format!("{endpoint}: no answer"))?;
-        if session.is_some() {
+        if signed_in {
             self.take_rotated(response.headers());
         }
         let status = response.status();
@@ -480,6 +509,207 @@ impl Innertube {
         out
     }
 
+    /// Whether the signed-in person owns a playlist, and so can add to it or
+    /// delete it: owned ones come with editing controls nothing else has.
+    pub async fn owns_playlist(&self, browse_id: &str) -> Result<bool> {
+        let json = self.browse_id(browse_id, None).await?;
+        Ok(find_any(
+            &json,
+            &[
+                "musicEditablePlaylistDetailHeaderRenderer",
+                "editPlaylistEndpoint",
+            ],
+        )
+        .is_some())
+    }
+
+    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<()> {
+        let json = self
+            .post(
+                "browse/edit_playlist",
+                json!({
+                    "playlistId": playlist_id.trim_start_matches("VL"),
+                    "actions": [{
+                        "action": "ACTION_ADD_VIDEO",
+                        "addedVideoId": video_id,
+                        "dedupeOption": "DEDUPE_OPTION_SKIP",
+                    }],
+                }),
+            )
+            .await?;
+        // HTTP 200 also carries a refusal (not the owner, stale session).
+        match json["status"].as_str() {
+            Some("STATUS_SUCCEEDED") | None => Ok(()),
+            Some(status) => bail!("YouTube refused: {status}"),
+        }
+    }
+
+    /// youtube.com's InnerTube, anonymously: everything asked of it is
+    /// public, and the session has no business on a second client.
+    async fn post_web(&self, endpoint: &str, mut body: Value) -> Result<Value> {
+        body["context"] = json!({
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": WEB_CLIENT_VERSION,
+                "hl": "en",
+                "gl": "US",
+            },
+        });
+        let response = self
+            .http
+            .post(format!("{WEB_API}/{endpoint}?prettyPrint=false"))
+            .header("User-Agent", USER_AGENT)
+            .header("X-YouTube-Client-Name", "1")
+            .header("X-YouTube-Client-Version", WEB_CLIENT_VERSION)
+            .header("Origin", "https://www.youtube.com")
+            .header("Referer", "https://www.youtube.com/")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("youtube {endpoint}: no answer"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            bail!(
+                "youtube {endpoint}: HTTP {status}: {}",
+                text.chars().take(200).collect::<String>()
+            );
+        }
+        Ok(response.json().await?)
+    }
+
+    /// An artist's sets, newest first: videos of half an hour or more whose
+    /// title names them, from a date-sorted search of the name and a few
+    /// set words. One query failing costs only its results.
+    pub async fn artist_sets(&self, name: &str) -> Result<Vec<Item>> {
+        let searches = SET_QUERIES.map(|words| {
+            self.post_web(
+                "search",
+                json!({ "query": format!("{name}{words}"), "params": SORT_BY_DATE }),
+            )
+        });
+        let results = futures_util::future::join_all(searches).await;
+        let mut sets: Vec<(u64, Item)> = Vec::new();
+        let mut failure = None;
+        for result in results {
+            let json = match result {
+                Ok(json) => json,
+                Err(error) => {
+                    failure = Some(error);
+                    continue;
+                }
+            };
+            let mut videos = Vec::new();
+            find_all(&json, "videoRenderer", &mut videos);
+            for video in videos {
+                if let Some(set) = set_item(video, name)
+                    && !sets.iter().any(|(_, kept)| kept.id == set.1.id)
+                {
+                    sets.push(set);
+                }
+            }
+        }
+        if sets.is_empty()
+            && let Some(error) = failure
+        {
+            return Err(error);
+        }
+        // The search sorts its main list only; shelves it adds come after,
+        // out of order.
+        sets.sort_by_key(|(age, _)| *age);
+        Ok(sets
+            .into_iter()
+            .map(|(_, item)| item)
+            .take(SETS_KEPT)
+            .collect())
+    }
+
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.post(
+            "playlist/delete",
+            json!({ "playlistId": playlist_id.trim_start_matches("VL") }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Records a play in the signed-in account's history, the way
+    /// music.youtube.com's player does once a track starts: the playback
+    /// beacon from the track's `/player` answer. yt-dlp, which fetches the
+    /// audio, never sends it, so without this nothing reaches the history.
+    pub async fn report_play(&self, video_id: &str) -> Result<()> {
+        let signature = self.signature_timestamp().await?;
+        let player = self
+            .post(
+                "player",
+                json!({
+                    "videoId": video_id,
+                    "playbackContext": { "contentPlaybackContext": { "signatureTimestamp": signature } },
+                }),
+            )
+            .await?;
+        let url = player["playbackTracking"]["videostatsPlaybackUrl"]["baseUrl"]
+            .as_str()
+            .with_context(|| {
+                let status = player["playabilityStatus"]["status"]
+                    .as_str()
+                    .unwrap_or("no status");
+                format!("no history beacon for {video_id} ({status})")
+            })?;
+        let request = self
+            .http
+            .get(url)
+            .query(&[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", &playback_nonce())])
+            .header("User-Agent", USER_AGENT)
+            .header("Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .header("X-Goog-AuthUser", "0");
+        let (request, signed_in) = self.authorized(request);
+        if !signed_in {
+            bail!("not signed in");
+        }
+        let response = request.send().await.map_err(reqwest::Error::without_url)?;
+        self.take_rotated(response.headers());
+        response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        Ok(())
+    }
+
+    async fn signature_timestamp(&self) -> Result<u64> {
+        if let Some(signature) = *self.signature.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Ok(signature);
+        }
+        let get = |url: String| async move {
+            self.http
+                .get(url)
+                .header("User-Agent", USER_AGENT)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await
+        };
+        let page = get("https://music.youtube.com/".into()).await?;
+        let script_path =
+            between(&page, "\"jsUrl\":\"", "\"").context("no player script on the page")?;
+        let script = get(format!("https://music.youtube.com{script_path}")).await?;
+        let signature = script
+            .split_once("signatureTimestamp")
+            .and_then(|(_, rest)| {
+                let digits: String = rest
+                    .trim_start_matches([':', '=', ' '])
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse().ok()
+            })
+            .context("no signature timestamp in the player script")?;
+        *self.signature.lock().unwrap_or_else(|e| e.into_inner()) = Some(signature);
+        Ok(signature)
+    }
+
     /// The signed-in account, or `None` when YouTube answers as anonymous.
     pub async fn account(&self) -> Result<Option<Account>> {
         let json = self.post("account/account_menu", json!({})).await?;
@@ -496,6 +726,22 @@ impl Innertube {
             .map(str::to_string);
         Ok(Some(Account { name, email, photo }))
     }
+}
+
+/// The text between `start` and the next `end` after it.
+fn between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let from = text.find(start)? + start.len();
+    let len = text[from..].find(end)?;
+    Some(&text[from..from + len])
+}
+
+/// A client playback nonce: sixteen URL-safe base64 characters, new for
+/// every play, as the web player makes them.
+fn playback_nonce() -> String {
+    const ALPHABET: &[u8; 64] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    (0..16)
+        .map(|_| char::from(ALPHABET[rand::random_range(0..ALPHABET.len())]))
+        .collect()
 }
 
 fn search_params(filter: SearchFilter) -> Option<&'static str> {
@@ -738,6 +984,71 @@ pub(crate) fn find_all<'a>(value: &'a Value, key: &str, out: &mut Vec<&'a Value>
         }
         Value::Array(list) => list.iter().for_each(|v| find_all(v, key, out)),
         _ => {}
+    }
+}
+
+/// A youtube.com search row as a set, with its age in seconds for the
+/// order, when it is long enough and its title names the artist.
+fn set_item(video: &Value, artist: &str) -> Option<(u64, Item)> {
+    let id = video["videoId"].as_str()?;
+    let title = text(&video["title"]);
+    let duration = parse_duration(&text(&video["lengthText"]))?;
+    if duration < MIN_SET_SECONDS || !names(&title, artist) {
+        return None;
+    }
+    let published = text(&video["publishedTimeText"]);
+    let channel = text(&video["ownerText"]);
+    let subtitle = [channel.as_str(), published.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" • ");
+    let item = Item {
+        kind: Kind::Video,
+        id: id.to_string(),
+        title,
+        subtitle,
+        thumbnails: thumbnails(&video["thumbnail"]),
+        artists: Vec::new(),
+        album: None,
+        duration: Some(duration),
+        explicit: false,
+        play_video_id: None,
+    };
+    Some((age(&published), item))
+}
+
+/// Whether `name` is in `title` as a whole word, so a short name does not
+/// match inside a longer one, nor a set by someone who only mentions it.
+fn names(title: &str, name: &str) -> bool {
+    let (title, name) = (title.to_lowercase(), name.to_lowercase());
+    if name.is_empty() {
+        return false;
+    }
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    title.match_indices(&name).any(|(at, _)| {
+        !word(title[..at].chars().next_back()) && !word(title[at + name.len()..].chars().next())
+    })
+}
+
+/// "3 weeks ago" in rough seconds, for ordering only; undated rows last.
+fn age(published: &str) -> u64 {
+    const UNITS: [(&str, u64); 7] = [
+        ("second", 1),
+        ("minute", 60),
+        ("hour", 3_600),
+        ("day", 86_400),
+        ("week", 604_800),
+        ("month", 2_629_800),
+        ("year", 31_557_600),
+    ];
+    let count = published
+        .split_whitespace()
+        .find_map(|word| word.parse::<u64>().ok());
+    let unit = UNITS.iter().find(|(unit, _)| published.contains(unit));
+    match (count, unit) {
+        (Some(count), Some((_, seconds))) => count * seconds,
+        _ => u64::MAX,
     }
 }
 
@@ -1350,6 +1661,53 @@ mod tests {
                 .expect("client"),
             None,
         )
+    }
+
+    #[test]
+    fn a_set_names_the_artist_as_a_word() {
+        assert!(names("Anyma B2B Solomun | Tomorrowland 2025", "anyma"));
+        assert!(names("Korolova - Live @ Hï Ibiza", "Korolova"));
+        assert!(!names("Anymal live in Berlin", "Anyma"));
+        assert!(!names("ARTBAT live at Tomorrowland", "Anyma"));
+    }
+
+    #[test]
+    fn ages_order_newest_first() {
+        assert!(age("3 days ago") < age("2 weeks ago"));
+        assert!(age("Streamed 11 months ago") < age("1 year ago"));
+        assert_eq!(age(""), u64::MAX);
+    }
+
+    #[tokio::test]
+    #[ignore = "talks to YouTube"]
+    async fn live_artist_sets() {
+        let it = client();
+        let sets = it.artist_sets("Anyma").await.expect("sets");
+        for set in sets.iter().take(5) {
+            println!("{} | {} | {:?}s", set.title, set.subtitle, set.duration);
+        }
+        println!("{} sets", sets.len());
+        assert!(!sets.is_empty());
+        let artist = it
+            .search("Anyma", SearchFilter::Artists)
+            .await
+            .expect("search");
+        let id = artist
+            .shelves
+            .iter()
+            .flat_map(|s| &s.items)
+            .find(|i| i.kind == Kind::Artist)
+            .map(|i| i.id.clone())
+            .expect("an artist");
+        let page = it.artist(&id).await.expect("artist");
+        for shelf in &page.shelves {
+            println!(
+                "shelf {:?}: {} items, list {}",
+                shelf.title,
+                shelf.items.len(),
+                shelf.list
+            );
+        }
     }
 
     #[tokio::test]

@@ -2,10 +2,15 @@
 
 use std::hash::Hash;
 
-use egui::{Color32, Id, Label, Rect, RichText, Sense, Ui, Vec2, vec2};
+use egui::{
+    Align, Align2, Color32, CursorIcon, Id, Label, Layout, Rect, RichText, Sense, Ui, Vec2, vec2,
+};
 
-use crate::app::{Action, App, LIBRARY_ALBUMS, LIBRARY_ARTISTS, LIBRARY_PLAYLISTS};
-use crate::model::{Browse, Collection, Item, Kind, Loadable, Page, SearchFilter};
+use crate::app::{
+    Action, App, HOME_PLAYLISTS, HOME_SETS, HomeSection, LIBRARY_ALBUMS, LIBRARY_ARTISTS,
+    LIBRARY_PLAYLISTS,
+};
+use crate::model::{Browse, Collection, Item, Kind, Loadable, Page, SearchFilter, Shelf};
 use crate::theme::{self, Icon};
 use crate::ui::widgets::{self, Lead, card_grid, failed, loading, pill, reveal};
 
@@ -26,6 +31,88 @@ fn title(ui: &mut Ui, text: &str, size: f32) {
     );
 }
 
+const RECENT_WIDTH: f32 = 640.0;
+const RECENT_ROW: f32 = 46.0;
+
+/// The last searches, newest first; a click runs one again.
+fn recent_searches(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    let recent = &app.settings.recent_searches;
+    if recent.is_empty() {
+        return;
+    }
+    let width = ui.available_width().min(RECENT_WIDTH);
+    ui.add_space(30.0);
+    ui.allocate_ui_with_layout(
+        vec2(width, 30.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            widgets::heading(ui, "Recent searches");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let clear = egui::Button::new(
+                    RichText::new("Clear all")
+                        .font(theme::semibold(13.0))
+                        .color(theme::SECONDARY),
+                )
+                .frame_when_inactive(false)
+                .corner_radius(14.0);
+                if ui
+                    .add(clear)
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    actions.push(Action::ClearSearches);
+                }
+            });
+        },
+    );
+    ui.add_space(10.0);
+    let since = since(ui, "recent-searches");
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for (index, query) in recent.iter().enumerate() {
+        ui.scope(|ui| {
+            reveal(ui, since, index);
+            recent_search(ui, query, width, actions);
+        });
+    }
+}
+
+fn recent_search(ui: &mut Ui, query: &str, width: f32, actions: &mut Vec<Action>) {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, RECENT_ROW), Sense::click());
+    // The pointer may be on the remove button, which takes the row's hover.
+    let over = ui.rect_contains_pointer(rect);
+    if over {
+        ui.painter().rect_filled(rect, 10.0, theme::SURFACE_HOVER);
+    }
+    let badge = Rect::from_center_size(rect.left_center() + vec2(24.0, 0.0), Vec2::splat(32.0));
+    ui.painter()
+        .circle_filled(badge.center(), 16.0, theme::SURFACE);
+    Icon::History.image(theme::SECONDARY, 16.0).paint_at(
+        ui,
+        Rect::from_center_size(badge.center(), Vec2::splat(16.0)),
+    );
+    let text = Rect::from_min_max(rect.min + vec2(52.0, 0.0), rect.max - vec2(52.0, 0.0));
+    ui.painter().with_clip_rect(text).text(
+        text.left_center(),
+        Align2::LEFT_CENTER,
+        query,
+        theme::medium(15.0),
+        theme::TEXT,
+    );
+    if over {
+        let remove =
+            Rect::from_center_size(rect.right_center() - vec2(24.0, 0.0), Vec2::splat(30.0));
+        if widgets::icon_button_at(ui, remove, Icon::Close, 16.0, theme::SECONDARY, "Remove")
+            .clicked()
+        {
+            actions.push(Action::ForgetSearch(query.to_string()));
+            return;
+        }
+    }
+    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        actions.push(Action::Search(query.to_string()));
+    }
+}
+
 /// A spinner that asks for more once it scrolls into view.
 fn load_more(ui: &mut Ui, action: Action, actions: &mut Vec<Action>) {
     ui.add_space(12.0);
@@ -37,35 +124,147 @@ fn load_more(ui: &mut Ui, action: Action, actions: &mut Vec<Action>) {
     }
 }
 
+/// Home: YouTube's shelves and the app's own, in the order and with the
+/// ones picked in Settings. The app's own draw without waiting for the feed.
 pub fn home(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    ui.add_space(8.0);
+    let sections: Vec<HomeSection> = app
+        .home_sections()
+        .into_iter()
+        .filter(|s| app.shows_shelf(s.title()))
+        .collect();
+    let feed = app.home.get();
+    let key = feed
+        .and_then(|f| f.shelves.first())
+        .map(|s| s.title.clone());
+    let since = since(ui, ("home", key));
+    for (i, section) in sections.iter().enumerate() {
+        ui.scope(|ui| {
+            reveal(ui, since, i);
+            match section {
+                HomeSection::Feed(shelf) => widgets::shelf(ui, app, shelf, actions),
+                HomeSection::Playlists => playlists_shelf(ui, app, actions),
+                HomeSection::Sets => sets_shelf(ui, app, actions),
+                HomeSection::New => new_releases(ui, app, actions),
+            }
+        });
+    }
     match &app.home {
-        Loadable::Loaded(feed) => {
-            ui.add_space(8.0);
-            let key = feed.shelves.first().map(|s| s.title.clone());
-            let since = since(ui, ("home", key));
-            for (i, shelf) in feed.shelves.iter().enumerate() {
-                ui.scope(|ui| {
-                    reveal(ui, since, i);
-                    widgets::shelf(ui, app, shelf, actions);
-                });
-            }
-            if feed.continuation.is_some() {
-                load_more(ui, Action::LoadMoreHome, actions);
-            }
+        Loadable::Loaded(feed) if feed.continuation.is_some() => {
+            load_more(ui, Action::LoadMoreHome, actions)
         }
+        Loadable::Loaded(_) => {}
         Loadable::Failed(error) => failed(ui, error, Page::Home, actions),
         _ => loading(ui),
     }
 }
 
+fn playlists_shelf(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    let Some(items) = app.library.get(LIBRARY_PLAYLISTS).and_then(Loadable::get) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let shelf = Shelf {
+        title: HOME_PLAYLISTS.to_string(),
+        items: items.clone(),
+        list: false,
+        more: None,
+    };
+    widgets::shelf(ui, app, &shelf, actions);
+}
+
+/// The picked artists as chips, and the sets of the one chosen.
+fn sets_shelf(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    let Some(chosen) = app.sets_artist_now() else {
+        return;
+    };
+    let sets = app.artist_sets.get(&chosen.id);
+    let shelf = Shelf {
+        title: HOME_SETS.to_string(),
+        items: sets.and_then(Loadable::get).cloned().unwrap_or_default(),
+        list: false,
+        more: None,
+    };
+    let mut picked = None;
+    widgets::shelf_with(ui, app, &shelf, actions, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for artist in &app.settings.home_artists {
+                let on = artist.id == chosen.id;
+                let chip = widgets::artist_chip(ui, &artist.name, &artist.thumbnails, on, false);
+                if chip.response.clicked() && !on {
+                    picked = Some(artist.id.clone());
+                }
+            }
+        });
+        ui.add_space(14.0);
+        let status = match sets {
+            Some(Loadable::Loaded(items)) if items.is_empty() => {
+                format!("No sets of half an hour or more found for {}.", chosen.name)
+            }
+            Some(Loadable::Failed(error)) => format!("Could not look up sets: {error}"),
+            Some(Loadable::Loaded(_)) => return,
+            _ => {
+                ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
+                return;
+            }
+        };
+        ui.label(RichText::new(status).color(theme::SECONDARY));
+    });
+    if let Some(id) = picked {
+        actions.push(Action::PickSetsArtist(id));
+    }
+}
+
+/// A shelf per picked artist: their latest singles and albums, then their
+/// top songs.
+fn new_releases(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    for artist in &app.settings.home_artists {
+        let Some(page) = app.artists.get(&artist.id).and_then(Loadable::get) else {
+            continue;
+        };
+        let take = |title: &str, count: usize| {
+            page.shelves
+                .iter()
+                .find(|s| s.title.starts_with(title))
+                .into_iter()
+                .flat_map(move |s| s.items.iter().take(count).cloned())
+        };
+        let items: Vec<Item> = take("Singles", NEW_SINGLES)
+            .chain(take("Albums", NEW_ALBUMS))
+            .chain(take("Top songs", NEW_TOP_SONGS))
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let shelf = Shelf {
+            title: format!("New from {}", artist.name),
+            items,
+            list: false,
+            more: None,
+        };
+        ui.push_id(("new-from", &artist.id), |ui| {
+            widgets::shelf(ui, app, &shelf, actions)
+        });
+    }
+}
+
+const NEW_SINGLES: usize = 6;
+const NEW_ALBUMS: usize = 4;
+const NEW_TOP_SONGS: usize = 6;
+
 pub fn search(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
-    if app.search_query.is_empty() {
+    // An emptied field goes back to the start: the recent searches.
+    if app.search_query.is_empty() || app.search_text.trim().is_empty() {
         title(ui, "Search", 34.0);
         ui.add_space(6.0);
         ui.label(
             RichText::new("Type in the field above and press Enter. ⌘F / Ctrl+F jumps there.")
                 .color(theme::SECONDARY),
         );
+        recent_searches(ui, app, actions);
         return;
     }
     title(ui, &format!("“{}”", app.search_query), 30.0);
@@ -118,7 +317,7 @@ pub fn search(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                     actions.push(Action::OpenItem(items[at].clone()));
                 }
             } else {
-                card_grid(ui, &items, app.signed_in, actions);
+                card_grid(ui, &items, app, actions);
             }
         });
         return;
@@ -225,7 +424,7 @@ fn track_list(
                 Lead::Art
             };
             let is_playing = playing.as_deref() == Some(track.id.as_str());
-            if widgets::track_row(ui, track, lead, is_playing, app.signed_in, actions).clicked() {
+            if widgets::track_row(ui, track, lead, is_playing, app, actions).play {
                 clicked = Some(at);
             }
         }
@@ -443,7 +642,7 @@ pub fn feed(ui: &mut Ui, app: &App, target: &Browse, actions: &mut Vec<Action>) 
                 });
             }
         } else {
-            card_grid(ui, &shelf.items, app.signed_in, actions);
+            card_grid(ui, &shelf.items, app, actions);
         }
     } else {
         for shelf in &feed.shelves {
@@ -511,7 +710,7 @@ pub fn library(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         Some(Loadable::Loaded(items)) => {
             ui.scope(|ui| {
                 reveal(ui, since(ui, ("library", browse_id)), 0);
-                card_grid(ui, items, app.signed_in, actions);
+                card_grid(ui, items, app, actions);
             });
         }
         Some(Loadable::Failed(error)) => failed(ui, error, Page::Library, actions),

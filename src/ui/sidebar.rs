@@ -5,8 +5,13 @@ use egui::{
 };
 
 use crate::app::{Action, App, LIBRARY_PLAYLISTS};
-use crate::model::{Loadable, Page};
+use crate::model::{Item, Loadable, Page};
 use crate::theme::{self, Icon};
+use crate::ui::widgets;
+
+const PIN_ICON: f32 = 12.0;
+const SIDEBAR_PHOTO: f32 = 26.0;
+const PIN_SPACE: f32 = 18.0;
 
 fn nav(ui: &mut Ui, icon: Icon, text: &str, selected: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
@@ -42,11 +47,12 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     egui::Panel::left("sidebar")
         .exact_size(theme::SIDEBAR_WIDTH)
         .resizable(false)
-        .frame(
-            Frame::new()
-                .fill(theme::SIDEBAR)
-                .inner_margin(Margin::symmetric(12, 18)),
-        )
+        .frame(Frame::new().fill(theme::SIDEBAR).inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 18 + theme::TRAFFIC_LIGHTS as i8,
+            bottom: 18,
+        }))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
@@ -99,7 +105,8 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                     ui.add_space(14.0);
                     match (&app.account, app.signed_in) {
                         (Some(account), _) => {
-                            ui.add(Icon::User.image(theme::SECONDARY, 16.0));
+                            widgets::avatar(ui, Some(account), SIDEBAR_PHOTO);
+                            ui.add_space(2.0);
                             ui.add(
                                 Label::new(RichText::new(&account.name).color(theme::SECONDARY))
                                     .truncate(),
@@ -108,13 +115,13 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                         (None, true) => {
                             _ = ui.label(RichText::new("Signed in").color(theme::SECONDARY))
                         }
-                        (None, false) => {
-                            if crate::ui::widgets::pill(ui, Some(Icon::User), "Sign in", true)
-                                .clicked()
-                            {
+                        (None, false) if app.session_ready => {
+                            if widgets::pill(ui, Some(Icon::User), "Sign in", true).clicked() {
                                 actions.push(Action::Open(Page::Settings));
                             }
                         }
+                        // Still reading the stored session: nothing to offer yet.
+                        (None, false) => {}
                     }
                 });
             });
@@ -122,6 +129,9 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
 }
 
 fn playlists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    if !app.session_ready {
+        return;
+    }
     if !app.signed_in {
         ui.add_space(8.0);
         ui.label(RichText::new("Sign in to see your playlists here.").color(theme::DIM));
@@ -129,6 +139,11 @@ fn playlists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     }
     match app.library.get(LIBRARY_PLAYLISTS) {
         Some(Loadable::Loaded(items)) => {
+            // Pinned first, in the order they were pinned; the rest as the
+            // library lists them.
+            let pinned = |item: &Item| app.settings.pinned.iter().position(|id| *id == item.id);
+            let mut items: Vec<&Item> = items.iter().collect();
+            items.sort_by_key(|item| pinned(item).unwrap_or(usize::MAX));
             for item in items {
                 let selected = app.page == Page::Playlist(item.id.clone());
                 let (rect, response) =
@@ -145,11 +160,20 @@ fn playlists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                     );
                 }
                 let art = Rect::from_min_size(rect.min + vec2(6.0, 5.0), Vec2::splat(36.0));
-                crate::ui::widgets::paint_art(ui, art, &item.thumbnails, 4.0);
+                widgets::paint_art(ui, art, &item.thumbnails, 4.0);
                 let text_rect = Rect::from_min_max(
                     egui::pos2(art.max.x + 10.0, rect.min.y),
-                    rect.max - vec2(6.0, 0.0),
+                    rect.max - vec2(6.0 + PIN_SPACE, 0.0),
                 );
+                if pinned(item).is_some() {
+                    let pin = Rect::from_center_size(
+                        egui::pos2(rect.right() - 6.0 - PIN_SPACE / 2.0, rect.center().y),
+                        Vec2::splat(PIN_ICON),
+                    );
+                    Icon::Pin
+                        .image(theme::ACCENT_HOVER, PIN_ICON)
+                        .paint_at(ui, pin);
+                }
                 let mut text = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(text_rect)
@@ -173,6 +197,7 @@ fn playlists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                     )
                     .truncate(),
                 );
+                response.context_menu(|ui| widgets::item_menu(ui, item, app, actions));
                 if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     actions.push(Action::Open(Page::Playlist(item.id.clone())));
                 }

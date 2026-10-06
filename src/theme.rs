@@ -22,6 +22,10 @@ pub const GLOW: Color32 = Color32::from_rgb(0x3d, 0x05, 0x14);
 
 pub const SIDEBAR_WIDTH: f32 = 232.0;
 pub const PLAYER_HEIGHT: f32 = 92.0;
+/// Room the macOS traffic lights take over the sidebar's top.
+pub const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 22.0 } else { 0.0 };
+/// The strip along the window's top that drags it, where there is no title bar.
+pub const DRAG_STRIP: f32 = 56.0;
 pub const SIDE_PANEL_WIDTH: f32 = 360.0;
 pub const PAGE_MARGIN: f32 = 32.0;
 pub const CARD_WIDTH: f32 = 176.0;
@@ -54,8 +58,8 @@ fastframe_icons::icons! {
         Lyrics => "mic-vocal",
         Like => "thumbs-up",
         Liked => "thumbs-up-filled",
-        Dislike => "thumbs-down",
-        Disliked => "thumbs-down-filled",
+        History => "history",
+        Sliders => "sliders-horizontal",
         Search => lucide "search",
         Settings => lucide "settings",
         Volume => lucide "volume-2",
@@ -67,6 +71,14 @@ fastframe_icons::icons! {
         User => lucide "user",
         LogOut => lucide "log-out",
         Refresh => lucide "refresh-cw",
+        Pin => lucide "pin",
+        Unpin => lucide "pin-off",
+        Trash => lucide "trash-2",
+        Copy => lucide "copy",
+        Plus => lucide "plus",
+        Check => lucide "check",
+        Up => lucide "chevron-up",
+        Down => lucide "chevron-down",
     }
 }
 
@@ -132,6 +144,10 @@ pub fn install(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = 28.0;
+        style.spacing.menu_margin = egui::Margin::same(6);
+        // Text is plain: rows and cards under it keep the pointer and the
+        // clicks.
+        style.interaction.selectable_labels = false;
         style.text_styles.insert(egui::TextStyle::Body, body(14.0));
         style
             .text_styles

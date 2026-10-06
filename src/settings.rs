@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::{EQ_BANDS, EqPreset};
+use crate::model::Thumbnail;
 use crate::queue::Queue;
 
 /// Queued tracks kept across runs, centred on the current one.
@@ -26,9 +27,30 @@ pub struct Settings {
     pub autoplay: bool,
     /// The browser the session was read from.
     pub browser: String,
+    /// A device (by unique ID) that plays along with the system's default
+    /// output; macOS only.
+    pub second_output: Option<String>,
+    /// Playlists pinned to the top of the sidebar, in pinning order.
+    pub pinned: Vec<String>,
+    /// The last searches, newest first.
+    pub recent_searches: Vec<String>,
+    /// Home's sections, by YouTube's titles: the order set for them, and
+    /// the ones left out.
+    pub home_order: Vec<String>,
+    pub home_hidden: Vec<String>,
+    /// Artists picked for Home's sets and new-releases sections.
+    pub home_artists: Vec<HomeArtist>,
     pub queue: Queue,
     /// Seconds into the current track when the app last closed.
     pub position: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HomeArtist {
+    /// The artist's YouTube Music browse id.
+    pub id: String,
+    pub name: String,
+    pub thumbnails: Vec<Thumbnail>,
 }
 
 impl Default for Settings {
@@ -41,6 +63,12 @@ impl Default for Settings {
             eq_custom: [0.0; EQ_BANDS.len()],
             autoplay: true,
             browser: "chrome".into(),
+            second_output: None,
+            pinned: Vec::new(),
+            recent_searches: Vec::new(),
+            home_order: Vec::new(),
+            home_hidden: Vec::new(),
+            home_artists: Vec::new(),
             queue: Queue::default(),
             position: 0.0,
         }

@@ -77,6 +77,22 @@ impl Session {
         Session { cookies }
     }
 
+    /// The cookies as a Netscape cookie file, for yt-dlp. They expire a day
+    /// on: the file lives only for one resolve.
+    pub fn to_netscape(&self) -> String {
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+            + 24 * 60 * 60;
+        let mut file = String::from("# Netscape HTTP Cookie File\n");
+        for (name, value) in &self.cookies {
+            file.push_str(&format!(
+                ".youtube.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n"
+            ));
+        }
+        file
+    }
+
     pub fn header(&self) -> String {
         let pairs: Vec<String> = self
             .cookies
@@ -210,6 +226,10 @@ mod tests {
         let mut session = Session::from_netscape(file).expect("signed in");
         assert_eq!(session.header(), "SAPISID=abc; SID=sid1");
         assert_eq!(Session::from_header(&session.header()), session);
+        assert_eq!(
+            Session::from_netscape(&session.to_netscape()),
+            Some(session.clone())
+        );
         assert_eq!(
             sapisidhash(1, "abc"),
             format!("SAPISIDHASH 1_{}", {

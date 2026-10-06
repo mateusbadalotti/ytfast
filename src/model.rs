@@ -48,6 +48,20 @@ impl Item {
         matches!(self.kind, Kind::Song | Kind::Video)
     }
 
+    /// The item's page on music.youtube.com, to share.
+    pub fn link(&self) -> String {
+        let base = "https://music.youtube.com";
+        match self.kind {
+            Kind::Song | Kind::Video => format!("{base}/watch?v={}", self.id),
+            Kind::Playlist => {
+                let list = self.id.strip_prefix("VL").unwrap_or(&self.id);
+                format!("{base}/playlist?list={list}")
+            }
+            Kind::Album => format!("{base}/browse/{}", self.id),
+            Kind::Artist => format!("{base}/channel/{}", self.id),
+        }
+    }
+
     pub fn artist_names(&self) -> String {
         if self.artists.is_empty() {
             return self.subtitle.clone();

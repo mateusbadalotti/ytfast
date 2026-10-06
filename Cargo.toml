@@ -21,7 +21,7 @@ directories = "6"
 rand = "0.9"
 # SAPISIDHASH, the signature InnerTube wants next to the session cookies.
 sha1 = "0.10"
-# The whole UI, as in Spotifast: glow keeps the binary and the tree small.
+# The whole UI. glow keeps the binary and the dependency tree small.
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11", "persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg"] }
@@ -36,13 +36,17 @@ fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 # Media keys and the desktop's Now Playing panels.
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
-# YouTube serves AAC in fragmented MP4 (itag 140); pure Rust, no ffmpeg.
-symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"] }
+# YouTube's audio: AAC in fragmented MP4 and Opus in WebM; pure Rust, no ffmpeg.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4", "mkv"] }
+# Opus, YouTube's best format (itag 251, and 774 for Premium), which
+# symphonia does not decode: the reference libopus, built into the binary
+# (building needs cmake and a C compiler).
+opusic-c = "1.6"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "fs"] }
 futures-util = "0.3"
 # Helium's cookies, which yt-dlp cannot read: Chromium's PBKDF2 key and
-# AES-128-CBC (src/helium.rs). The versions Spotifast builds with.
+# AES-128-CBC (src/helium.rs).
 aes = "0.8"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 # Session cookies live in the platform's credential store, never in JSON.
@@ -50,6 +54,20 @@ keyring-core = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+# The output on macOS (src/mac_output.rs): AVSampleBufferAudioRenderer is
+# what AirPods' Spatial Audio applies to (macOS never spatializes an AUHAL
+# client, which cpal is), and two renderers on one synchronizer play two
+# devices in step. The CoreAudio and CoreFoundation crates are the ones cpal
+# already compiles.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+# The menu bar (src/mac_menu.rs).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVSampleBufferAudioRenderer", "AVSampleBufferRenderSynchronizer", "AVQueuedSampleBufferRendering", "AVAudioProcessingSettings", "objc2-core-media"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "CMSync", "objc2-core-audio-types"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString", "CFArray"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
