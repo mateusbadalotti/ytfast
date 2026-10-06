@@ -1,0 +1,81 @@
+[package]
+name = "ytfast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "A native YouTube Music client"
+
+[[bin]]
+name = "ytfast"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+# Key order as the API sends it: "the first match" in a response walk means
+# what it means in the web client.
+serde_json = { version = "1", features = ["preserve_order"] }
+directories = "6"
+rand = "0.9"
+# SAPISIDHASH, the signature InnerTube wants next to the session cookies.
+sha1 = "0.10"
+# The whole UI, as in Spotifast: glow keeps the binary and the tree small.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11", "persistence"] }
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["image", "svg"] }
+# Cover art arrives as JPEG, PNG or WebP depending on the CDN.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Shared foundation of the fastframe apps; every crate from the same tag.
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# The device stream: no callbacks while paused, follows the default output.
+fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# The log on stderr and in a file for bug reports, and panics without payloads.
+fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# Media keys and the desktop's Now Playing panels.
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# YouTube serves AAC in fragmented MP4 (itag 140); pure Rust, no ffmpeg.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "fs"] }
+futures-util = "0.3"
+# Helium's cookies, which yt-dlp cannot read: Chromium's PBKDF2 key and
+# AES-128-CBC (src/helium.rs). The versions Spotifast builds with.
+aes = "0.8"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# Session cookies live in the platform's credential store, never in JSON.
+keyring-core = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "1.1", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-crypto-rust"] }
+fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.4.1", features = ["pulseaudio"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Decoding and immediate-mode layout are too slow at opt-level 0.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The egui and winit forks the fastframe apps share (see fastframe's README).
+[patch.crates-io]
+ecolor = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }
