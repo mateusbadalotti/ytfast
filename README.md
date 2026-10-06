@@ -1,7 +1,16 @@
 # ytfast
 
-A native YouTube Music client for macOS, Windows and Linux, written in Rust with egui: no browser engine, no Electron. Tracks stream on demand and start in a fraction of a second, always at the best quality your account gets (Opus at ~256 kbps with Premium). It has what a music app should: likes, playlists, synced lyrics, the queue, shuffle and repeat, crossfade, a nine-band equalizer, and plays that count in your YouTube Music history. On macOS it also does Spatial Audio, a second audio output, media keys and a full menu bar, and Home can be arranged to taste, with the long sets and new releases of the artists you pick.
+A fast, native YouTube Music app for macOS, Windows and Linux.
 
-Install it on macOS with `brew install --cask mateusbadalotti/tap/ytfast`. On Windows and Linux, download the archive for your system from the [latest release](https://github.com/mateusbadalotti/ytfast/releases/latest) and run `ytfast`. To sign in, open music.youtube.com in a browser on the same computer (Chrome, Helium, Firefox, Safari, Brave, Edge and others) and sign in there; ytfast reads that session from Settings. Audio comes through [yt-dlp](https://github.com/yt-dlp/yt-dlp), which ytfast downloads and keeps up to date by itself; it needs [Deno](https://deno.com) on the PATH, which the Homebrew cask installs. The app is not notarized, so macOS may ask you to allow it in System Settings → Privacy & Security the first time.
+![ytfast](.github/screenshot.png)
 
-To build from source, install Rust (the version is pinned in `rust-toolchain.toml`) and CMake, then run `cargo run --release`. Pushing a `v*` tag builds the macOS, Windows and Linux releases and updates the Homebrew cask. ytfast is an unofficial client, not affiliated with Google or YouTube, and is released under the MIT license.
+Everything a music app should have: your library and playlists, likes, lyrics, the queue, shuffle and repeat, crossfade and an equalizer. Home is yours to arrange: your playlists, long sets and new releases from the artists you pick, and only the YouTube sections you want.
+
+## Install
+
+- **macOS:** `brew install --cask mateusbadalotti/tap/ytfast`
+- **Windows and Linux:** download the app from the [latest release](https://github.com/mateusbadalotti/ytfast/releases/latest).
+
+To sign in, open music.youtube.com in your browser and sign in there, then choose that browser in ytfast's Settings. If macOS blocks the app the first time, allow it in System Settings → Privacy & Security.
+
+ytfast is unofficial and not affiliated with Google or YouTube. MIT license.
