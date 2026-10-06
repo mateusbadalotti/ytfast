@@ -1,10 +1,10 @@
 //! Signing in with the YouTube session of a browser on this computer.
 //!
 //! Without a browser engine there is no Google sign-in page to show. yt-dlp
-//! reads music.youtube.com's cookies out of a browser the person is signed in
-//! to; the session then lives in the platform's credential store, never in a
-//! settings file, and every request carries it with the SAPISIDHASH signature
-//! the web client sends.
+//! (or, for Helium on macOS, `helium.rs`) reads the youtube.com cookies out of
+//! a browser the person is signed in to; the session then lives in the
+//! platform's credential store, never in a settings file, and every request
+//! carries it with the SAPISIDHASH signature the web client sends.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

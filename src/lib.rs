@@ -1,4 +1,4 @@
-//! ytfast's internals, exposed so the binary and tests can reach them.
+//! ytfast's internals, exposed so the binary can reach them.
 
 pub mod app;
 pub mod audio;

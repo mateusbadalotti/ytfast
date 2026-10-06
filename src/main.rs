@@ -31,6 +31,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "ytfast",
         options,
-        Box::new(|cc| Ok(Box::new(ytfast::app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(ytfast::app::App::new(cc, paths)))),
     )
 }

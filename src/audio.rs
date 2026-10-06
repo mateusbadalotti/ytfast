@@ -1,6 +1,8 @@
 //! The sound itself: decoding, resampling to the device, the equaliser, the
-//! crossfade between two tracks, and the volume. It all runs inside the
-//! device callback, which `player.rs` hands this mixer to.
+//! crossfade between two tracks, and the volume. Each track decodes on a
+//! thread of its own; the mixer runs wherever the output renders it: the
+//! device callback (`player.rs`'s `Renderer`) or, on macOS, the player thread
+//! (`MacOutput::pump`), where the renderers apply the volume instead.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel, sync_channel};
@@ -61,9 +63,9 @@ impl EqPreset {
     }
 
     /// The preset curves, from YTubic's design handoff.
-    pub fn gains(self) -> Option<[f32; 9]> {
+    pub fn gains(self) -> Option<[f32; EQ_BANDS.len()]> {
         Some(match self {
-            EqPreset::Flat => [0.0; 9],
+            EqPreset::Flat => [0.0; EQ_BANDS.len()],
             EqPreset::Bass => [10.0, 8.0, 5.0, 2.0, 0.0, -1.0, -1.0, 0.0, 0.0],
             EqPreset::Vocal => [-3.0, -1.0, 2.0, 5.0, 6.0, 4.0, 2.0, 0.0, -1.0],
             EqPreset::Treble => [-2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 7.0, 9.0, 10.0],
@@ -76,11 +78,12 @@ impl EqPreset {
 }
 
 /// Opus always decodes at 48 kHz, whatever the container says.
-const OPUS_RATE: u32 = 48_000;
+pub(crate) const OPUS_RATE: u32 = 48_000;
 /// The longest Opus packet: 120 ms at 48 kHz.
 const OPUS_MAX_FRAMES: usize = 5760;
 
-/// Symphonia decodes AAC; Opus, which it does not, goes to `opus-decoder`.
+/// Symphonia decodes AAC; Opus, which it does not, goes to libopus
+/// (`opusic_c`).
 enum Codec {
     Symphonia(Box<dyn Decoder>),
     Opus {
@@ -179,10 +182,6 @@ impl Track {
             duration,
             failure: None,
         })
-    }
-
-    pub fn position(&self) -> f64 {
-        self.frames as f64 / f64::from(self.rate)
     }
 
     pub fn seek(&mut self, seconds: f64) {
@@ -370,7 +369,6 @@ enum Frame {
 
 /// A track on its way to the speakers: resampled, with its own fade.
 pub struct Voice {
-    pub id: String,
     decoding: Decoding,
     pcm: Option<Pcm>,
     read: usize,
@@ -387,7 +385,7 @@ pub struct Voice {
     next: [f32; 2],
     phase: f64,
     primed: bool,
-    /// Sound has reached the device.
+    /// The first frame has been mixed (on macOS, queued for the device).
     pub started: bool,
     pub finished: bool,
     /// Fading out after a skip or under a crossfade; no longer "the" track.
@@ -396,9 +394,8 @@ pub struct Voice {
 
 impl Voice {
     /// Starts decoding `source` from `from` seconds.
-    pub fn new(id: String, source: Box<dyn MediaSource>, from: f64) -> Self {
+    pub fn new(source: Box<dyn MediaSource>, from: f64) -> Self {
         Self {
-            id,
             decoding: Decoding::start(source, from),
             pcm: None,
             read: 0,
@@ -635,7 +632,7 @@ impl Biquad {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Eq {
     pub enabled: bool,
-    pub gains: [f32; 9],
+    pub gains: [f32; EQ_BANDS.len()],
 }
 
 struct Equalizer {
@@ -691,7 +688,8 @@ impl Equalizer {
 }
 
 /// Everything that plays. Shared between the player thread, which changes
-/// it, and the device callback, which renders it.
+/// it, and whatever renders it: the device callback, or on macOS the player
+/// thread itself.
 pub struct Mixer {
     pub rate: u32,
     channels: u16,
@@ -895,7 +893,7 @@ mod live {
             id.into(),
             None,
         );
-        let mut voice = Voice::new(id.into(), Box::new(download.reader()), 0.0);
+        let mut voice = Voice::new(Box::new(download.reader()), 0.0);
         let (first, played, peak, rms) = drain(&mut voice, 1000.0);
         let first = first.expect("sound");
         println!(
@@ -917,7 +915,7 @@ mod live {
             .expect("resolve");
         println!("resolve took {:.2}s", warm.elapsed().as_secs_f64());
         let download = Download::start(runtime.handle(), http, resolver, other.into(), None);
-        let mut voice = Voice::new(other.into(), Box::new(download.reader()), 150.0);
+        let mut voice = Voice::new(Box::new(download.reader()), 150.0);
         let (first, _, _, _) = drain(&mut voice, 1.0);
         println!(
             "warm, at 150s: first sound after {:.2}s, now at {:.1}s",

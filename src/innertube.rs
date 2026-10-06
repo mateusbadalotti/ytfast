@@ -14,11 +14,11 @@ use serde_json::{Value, json};
 use crate::auth::{self, Session};
 use crate::model::{
     Account, ArtistPage, Browse, Collection, Feed, Item, Kind, Link, Rating, SearchFilter,
-    SearchResults, Shelf, Thumbnail, Watch,
+    SearchResults, Shelf, Thumbnail, Watch, playlist_browse_id,
 };
 
 const CLIENT_VERSION: &str = "1.20260510.02.00";
-const API: &str = "https://music.youtube.com/youtubei/v1";
+pub(crate) const API: &str = "https://music.youtube.com/youtubei/v1";
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// A runaway guard for paged library shelves (~25 rows a page).
@@ -90,13 +90,6 @@ impl Innertube {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-    }
-
-    pub fn signed_in(&self) -> bool {
-        self.session
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
     }
 
     async fn post(&self, endpoint: &str, mut body: Value) -> Result<Value> {
@@ -183,7 +176,7 @@ impl Innertube {
         }
     }
 
-    async fn browse_id(&self, browse_id: &str, params: Option<&str>) -> Result<Value> {
+    async fn browse_page(&self, browse_id: &str, params: Option<&str>) -> Result<Value> {
         let mut body = json!({ "browseId": browse_id });
         if let Some(params) = params {
             body["params"] = json!(params);
@@ -198,7 +191,7 @@ impl Innertube {
     pub async fn home(&self, cursor: Option<&str>) -> Result<Feed> {
         let (sections, continuation) = match cursor {
             None => {
-                let json = self.browse_id("FEmusic_home", None).await?;
+                let json = self.browse_page("FEmusic_home", None).await?;
                 let list = first_tab(&json)["sectionListRenderer"].clone();
                 let sections = array(&list["contents"]).to_vec();
                 let next =
@@ -233,26 +226,23 @@ impl Innertube {
     pub async fn browse(&self, target: &Browse, cursor: Option<&str>) -> Result<Feed> {
         let json = match cursor {
             Some(cursor) => self.continuation(cursor).await?,
-            None => self.browse_id(&target.id, target.params.as_deref()).await?,
+            None => {
+                self.browse_page(&target.id, target.params.as_deref())
+                    .await?
+            }
         };
-        let wrappers = if cursor.is_some() {
+        let shelves = if cursor.is_some() {
             let contents = &json["continuationContents"];
             if contents["gridContinuation"]["items"].is_array() {
-                collect_shelves(&[
+                shelves_of(&[
                     json!({ "gridRenderer": { "items": contents["gridContinuation"]["items"] } }),
                 ])
             } else {
-                collect_shelves(array(&contents["sectionListContinuation"]["contents"]))
+                shelves_of(array(&contents["sectionListContinuation"]["contents"]))
             }
         } else {
-            collect_shelves(array(&first_tab(&json)["sectionListRenderer"]["contents"]))
+            shelves_of(array(&first_tab(&json)["sectionListRenderer"]["contents"]))
         };
-        let shelves = wrappers
-            .iter()
-            .enumerate()
-            .map(|(i, w)| map_shelf(w, i))
-            .filter(|s| !s.items.is_empty())
-            .collect();
         Ok(Feed {
             title: text(&json["header"]["musicHeaderRenderer"]["title"]),
             shelves,
@@ -261,7 +251,7 @@ impl Innertube {
     }
 
     pub async fn album(&self, id: &str) -> Result<Collection> {
-        let json = self.browse_id(id, None).await?;
+        let json = self.browse_page(id, None).await?;
         let header = first_of(&[
             &json["header"]["musicDetailHeaderRenderer"],
             &json["header"]["musicResponsiveHeaderRenderer"],
@@ -297,7 +287,6 @@ impl Innertube {
             })
             .collect();
         Ok(Collection {
-            id: id.to_string(),
             title,
             artists,
             subtitle: text(&header["subtitle"]),
@@ -310,12 +299,8 @@ impl Innertube {
     }
 
     pub async fn playlist(&self, id: &str) -> Result<Collection> {
-        let browse_id = if id.starts_with("VL") {
-            id.to_string()
-        } else {
-            format!("VL{id}")
-        };
-        let json = self.browse_id(&browse_id, None).await?;
+        let browse_id = playlist_browse_id(id);
+        let json = self.browse_page(&browse_id, None).await?;
         let empty = Value::Null;
         let header = find_any(
             &json,
@@ -344,7 +329,6 @@ impl Innertube {
         }
         let owner = text(&header["straplineTextOne"]);
         Ok(Collection {
-            id: browse_id.clone(),
             title: text(&header["title"]),
             artists: Vec::new(),
             subtitle: if owner.is_empty() {
@@ -368,7 +352,7 @@ impl Innertube {
     }
 
     pub async fn artist(&self, id: &str) -> Result<ArtistPage> {
-        let json = self.browse_id(id, None).await?;
+        let json = self.browse_page(id, None).await?;
         let header = first_of(&[
             &json["header"]["musicImmersiveHeaderRenderer"],
             &json["header"]["musicDetailHeaderRenderer"],
@@ -379,7 +363,6 @@ impl Innertube {
             &header["foregroundThumbnail"]["musicThumbnailRenderer"]["thumbnail"],
         ]));
         Ok(ArtistPage {
-            id: id.to_string(),
             name: text(&header["title"]),
             description: text(&header["description"]),
             audience: text(&header["monthlyListenerCount"]),
@@ -463,7 +446,7 @@ impl Innertube {
     /// Every item of a library page (`FEmusic_liked_playlists`,
     /// `FEmusic_liked_albums`, `FEmusic_library_corpus_artists`), all pages.
     pub async fn library(&self, browse_id: &str) -> Result<Vec<Item>> {
-        let json = self.browse_id(browse_id, None).await?;
+        let json = self.browse_page(browse_id, None).await?;
         let list = &first_tab(&json)["sectionListRenderer"];
         let wrappers = collect_shelves(array(&list["contents"]));
         let mut items = Vec::new();
@@ -517,7 +500,7 @@ impl Innertube {
     /// Whether the signed-in person owns a playlist, and so can add to it or
     /// delete it: owned ones come with editing controls nothing else has.
     pub async fn owns_playlist(&self, browse_id: &str) -> Result<bool> {
-        let json = self.browse_id(browse_id, None).await?;
+        let json = self.browse_page(browse_id, None).await?;
         Ok(find_any(
             &json,
             &[
@@ -601,7 +584,7 @@ impl Innertube {
     /// then the newest sets by the `picked` artists and the ones it played
     /// most.
     pub async fn long_listens(&self, picked: &[String]) -> Result<Vec<Item>> {
-        let json = self.browse_id(HISTORY, None).await?;
+        let json = self.browse_page(HISTORY, None).await?;
         let played: Vec<Item> = rows(&json).collect();
         let mut plays: Vec<(&str, usize)> = Vec::new();
         for artist in played.iter().flat_map(|item| &item.artists) {
@@ -807,12 +790,12 @@ fn search_params(filter: SearchFilter) -> Option<&'static str> {
 /// The "All" tab is one flat list of mixed rows; each row's kind is the first
 /// word of its subtitle ("Song • …"), English because the context pins `hl`.
 fn group_search(sections: &[Value]) -> SearchResults {
-    const GROUPS: [(&str, &str, bool); 5] = [
-        ("Song", "Songs", true),
-        ("Artist", "Artists", false),
-        ("Album", "Albums & singles", false),
-        ("Video", "Videos", true),
-        ("Playlist", "Community playlists", false),
+    const GROUPS: [(&str, bool); 5] = [
+        ("Songs", true),
+        ("Artists", false),
+        ("Albums & singles", false),
+        ("Videos", true),
+        ("Community playlists", false),
     ];
     let card = sections
         .iter()
@@ -846,7 +829,7 @@ fn group_search(sections: &[Value]) -> SearchResults {
         let Some(mut item) = map_responsive(row) else {
             continue;
         };
-        if group == 3 && item.kind == Kind::Song {
+        if token == "Video" && item.kind == Kind::Song {
             item.kind = Kind::Video;
         }
         if seen.insert((item.kind, item.id.clone())) {
@@ -857,7 +840,7 @@ fn group_search(sections: &[Value]) -> SearchResults {
         .iter()
         .zip(buckets)
         .filter(|(_, items)| !items.is_empty())
-        .map(|((_, title, list), items)| Shelf {
+        .map(|((title, list), items)| Shelf {
             title: title.to_string(),
             items,
             list: *list,
@@ -1000,7 +983,8 @@ fn description(header: &Value) -> String {
     }
 }
 
-/// The first value stored under `key`, depth first.
+/// The first object stored under `key`, depth first; values under it that
+/// are not objects are skipped.
 fn find<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     find_any(value, &[key])
 }
@@ -1105,11 +1089,7 @@ fn age(published: &str) -> u64 {
 fn rows(value: &Value) -> impl Iterator<Item = Item> {
     let mut found = Vec::new();
     find_all(value, "musicResponsiveListItemRenderer", &mut found);
-    found
-        .into_iter()
-        .filter_map(map_responsive)
-        .collect::<Vec<_>>()
-        .into_iter()
+    found.into_iter().filter_map(map_responsive)
 }
 
 /// The first paging token anywhere under `value`.
@@ -1273,10 +1253,8 @@ fn kind_of_page(page_type: &str) -> Option<Kind> {
     }
 }
 
-/// Sorts the linked runs of a subtitle into artists and an album. Returns
-/// whether any run linked anywhere.
-fn links(runs: &Value, artists: &mut Vec<Link>, album: &mut Option<Link>) -> bool {
-    let mut linked = false;
+/// Sorts the linked runs of a subtitle into artists and an album.
+fn links(runs: &Value, artists: &mut Vec<Link>, album: &mut Option<Link>) {
     for run in array(runs) {
         let Some((id, page_type)) = browse_target(&run["navigationEndpoint"]) else {
             continue;
@@ -1293,11 +1271,9 @@ fn links(runs: &Value, artists: &mut Vec<Link>, album: &mut Option<Link>) -> boo
                     name,
                 })
             }
-            _ => continue,
+            _ => {}
         }
-        linked = true;
     }
-    linked
 }
 
 fn explicit(raw: &Value) -> bool {
@@ -1580,7 +1556,7 @@ fn map_shelf(wrapper: &Value, index: usize) -> Shelf {
             items.extend(map_responsive(&content["musicResponsiveListItemRenderer"]));
         }
     }
-    if let Some(featured) = card.is_object().then(|| map_card_featured(card)).flatten() {
+    if let Some(featured) = map_card_featured(card) {
         items.insert(0, featured);
     }
     Shelf {

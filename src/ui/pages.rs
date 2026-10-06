@@ -113,6 +113,25 @@ fn recent_search(ui: &mut Ui, query: &str, width: f32, actions: &mut Vec<Action>
     }
 }
 
+/// One of a set of choices, filled when selected; true when clicked.
+fn choice(ui: &mut Ui, label: &str, selected: bool) -> bool {
+    let text = RichText::new(label)
+        .font(theme::semibold(13.5))
+        .color(if selected { theme::BG } else { theme::TEXT });
+    let fill = if selected {
+        theme::TEXT
+    } else {
+        theme::SURFACE_HOVER
+    };
+    ui.add(
+        egui::Button::new(text)
+            .fill(fill)
+            .corner_radius(16.0)
+            .min_size(vec2(0.0, 32.0)),
+    )
+    .clicked()
+}
+
 /// A spinner that asks for more once it scrolls into view.
 fn load_more(ui: &mut Ui, action: Action, actions: &mut Vec<Action>) {
     ui.add_space(12.0);
@@ -267,6 +286,8 @@ fn new_releases(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     }
 }
 
+/// An artist's description shown before "More".
+const DESCRIPTION_CHARS: usize = 320;
 const NEW_SINGLES: usize = 6;
 const NEW_ALBUMS: usize = 4;
 const NEW_TOP_SONGS: usize = 6;
@@ -274,7 +295,7 @@ const NEW_TOP_SONGS: usize = 6;
 pub fn search(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     // An emptied field goes back to the start: the recent searches.
     if app.search_query.is_empty() || app.search_text.trim().is_empty() {
-        title(ui, "Search", 34.0);
+        title(ui, "Search", theme::PAGE_TITLE);
         ui.add_space(6.0);
         ui.label(
             RichText::new("Type in the field above and press Enter. ⌘F / Ctrl+F jumps there.")
@@ -287,24 +308,7 @@ pub fn search(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         for filter in SearchFilter::ALL {
-            let selected = app.search_filter == filter;
-            let text = RichText::new(filter.label())
-                .font(theme::semibold(13.5))
-                .color(if selected { theme::BG } else { theme::TEXT });
-            let fill = if selected {
-                theme::TEXT
-            } else {
-                theme::SURFACE_HOVER
-            };
-            if ui
-                .add(
-                    egui::Button::new(text)
-                        .fill(fill)
-                        .corner_radius(16.0)
-                        .min_size(vec2(0.0, 32.0)),
-                )
-                .clicked()
-            {
+            if choice(ui, filter.label(), app.search_filter == filter) {
                 actions.push(Action::SearchFilter(filter));
             }
         }
@@ -413,7 +417,8 @@ fn top_result(ui: &mut Ui, item: &Item, actions: &mut Vec<Action>) {
 }
 
 /// Track rows, drawing only the ones on screen so a playlist of thousands
-/// costs what a screenful does. Returns the row clicked.
+/// costs what a screenful does. Returns the row asked to play: a double
+/// click, or a click on its play icon.
 fn track_list(
     ui: &mut Ui,
     app: &App,
@@ -611,8 +616,8 @@ pub fn artist(ui: &mut Ui, app: &App, id: &str, actions: &mut Vec<Action>) {
     });
     if !artist.description.is_empty() {
         ui.add_space(14.0);
-        let short: String = artist.description.chars().take(320).collect();
-        let more = if artist.description.chars().count() > 320 {
+        let short: String = artist.description.chars().take(DESCRIPTION_CHARS).collect();
+        let more = if artist.description.chars().count() > DESCRIPTION_CHARS {
             "…"
         } else {
             ""
@@ -646,7 +651,7 @@ pub fn feed(ui: &mut Ui, app: &App, target: &Browse, actions: &mut Vec<Action>) 
         &feed.title
     };
     ui.add_space(8.0);
-    title(ui, heading, 34.0);
+    title(ui, heading, theme::PAGE_TITLE);
     ui.add_space(18.0);
     if let [shelf] = feed.shelves.as_slice() {
         if shelf.list {
@@ -672,7 +677,7 @@ pub fn feed(ui: &mut Ui, app: &App, target: &Browse, actions: &mut Vec<Action>) 
 
 pub fn library(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     ui.add_space(8.0);
-    title(ui, "Library", 34.0);
+    title(ui, "Library", theme::PAGE_TITLE);
     ui.add_space(14.0);
     if !app.signed_in {
         ui.label(
@@ -694,24 +699,7 @@ pub fn library(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     let mut tab = ui.data(|d| d.get_temp::<usize>(key)).unwrap_or(0);
     ui.horizontal(|ui| {
         for (i, (_, label)) in TABS.iter().enumerate() {
-            let selected = tab == i;
-            let text = RichText::new(*label)
-                .font(theme::semibold(13.5))
-                .color(if selected { theme::BG } else { theme::TEXT });
-            let fill = if selected {
-                theme::TEXT
-            } else {
-                theme::SURFACE_HOVER
-            };
-            if ui
-                .add(
-                    egui::Button::new(text)
-                        .fill(fill)
-                        .corner_radius(16.0)
-                        .min_size(vec2(0.0, 32.0)),
-                )
-                .clicked()
-            {
+            if choice(ui, label, tab == i) {
                 tab = i;
             }
         }

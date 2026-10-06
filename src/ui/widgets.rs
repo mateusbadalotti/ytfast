@@ -204,7 +204,8 @@ pub fn paint_art(ui: &Ui, rect: Rect, thumbnails: &[Thumbnail], radius: f32) {
         .paint_at(ui, rect);
 }
 
-/// Artists as links, comma-separated, or the subtitle when nothing links.
+/// Artists, comma-separated, linked where they have a page; the subtitle
+/// when the item lists none.
 pub fn artist_links(
     ui: &mut Ui,
     item: &Item,
@@ -587,8 +588,9 @@ pub fn card(ui: &mut Ui, item: &Item, width: f32, app: &App, actions: &mut Vec<A
         if item.is_playable() {
             report_pointer(ui, &response, item, actions);
         }
-        // A song plays on a double click or its play button; everything else
-        // opens on one click, and an album or playlist plays from its button.
+        // A song, or a playlist card that is really one video, plays on a
+        // double click or its play button; everything else opens on one
+        // click, and an album or playlist plays from its button.
         let single = response.clicked() && !response.double_clicked();
         let on_button = response
             .interact_pointer_pos()
@@ -777,8 +779,7 @@ pub fn track_row(
     let on_icon = response
         .interact_pointer_pos()
         .is_some_and(|p| lead_rect.contains(p));
-    let play =
-        response.double_clicked() || (response.clicked() && !response.double_clicked() && on_icon);
+    let play = response.double_clicked() || (response.clicked() && on_icon);
     Row { response, play }
 }
 
@@ -879,12 +880,12 @@ pub fn shelf_with(
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
                 if shelf.list {
-                    for column in shelf.items.chunks(4) {
+                    for column in shelf.items.chunks(LIST_ROWS) {
                         ui.allocate_ui_with_layout(
-                            vec2(360.0, 4.0 * theme::ROW_HEIGHT),
+                            vec2(LIST_COLUMN_WIDTH, LIST_ROWS as f32 * theme::ROW_HEIGHT),
                             Layout::top_down(Align::Min),
                             |ui| {
-                                ui.set_width(360.0);
+                                ui.set_width(LIST_COLUMN_WIDTH);
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 for item in column {
                                     let row = track_row(
@@ -1020,11 +1021,16 @@ pub fn artist_chip(
     }
 }
 
+/// A list shelf's rows per column, and the column's width.
+const LIST_ROWS: usize = 4;
+const LIST_COLUMN_WIDTH: f32 = 360.0;
+
 /// A "More" link to a playlist opens the playlist page; the rest are feeds.
 pub fn more_page(more: &crate::model::Browse) -> Page {
-    match more.id.strip_prefix("VL") {
-        Some(_) => Page::Playlist(more.id.clone()),
-        None => Page::Browse(more.clone()),
+    if more.id.starts_with("VL") {
+        Page::Playlist(more.id.clone())
+    } else {
+        Page::Browse(more.clone())
     }
 }
 

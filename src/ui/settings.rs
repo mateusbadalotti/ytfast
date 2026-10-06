@@ -18,7 +18,7 @@ use crate::ui::widgets::{self, pill};
 
 const WIDTH: f32 = 760.0;
 const CARD_PADDING: f32 = 20.0;
-const ROW_HEIGHT: f32 = 58.0;
+const SETTING_ROW: f32 = 58.0;
 const ROW_PADDING: f32 = 12.0;
 /// Room the control on the right of a row keeps for itself.
 const CONTROL_WIDTH: f32 = 300.0;
@@ -38,7 +38,7 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     ui.add_space(8.0);
     ui.label(
         RichText::new("Settings")
-            .font(theme::display(34.0))
+            .font(theme::display(theme::PAGE_TITLE))
             .color(theme::TEXT),
     );
     ui.add_space(14.0);
@@ -114,23 +114,16 @@ fn row(ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
                     .color(theme::TEXT),
             );
             if !detail.is_empty() {
-                ui.add(
-                    Label::new(
-                        RichText::new(detail)
-                            .font(theme::body(12.5))
-                            .color(theme::DIM),
-                    )
-                    .wrap(),
-                );
+                note(ui, detail);
             }
             ui.add_space(ROW_PADDING);
         })
         .response
         .rect;
-    if text.height() < ROW_HEIGHT {
-        ui.add_space(ROW_HEIGHT - text.height());
+    if text.height() < SETTING_ROW {
+        ui.add_space(SETTING_ROW - text.height());
     }
-    let height = text.height().max(ROW_HEIGHT);
+    let height = text.height().max(SETTING_ROW);
     let controls =
         Rect::from_min_size(pos2(top.x + text_width, top.y), vec2(CONTROL_WIDTH, height));
     let mut controls = ui.new_child(

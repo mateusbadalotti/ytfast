@@ -31,8 +31,12 @@ impl Queue {
     }
 
     pub fn upcoming(&self) -> &[Item] {
-        let from = self.index.map_or(0, |i| i + 1).min(self.tracks.len());
-        &self.tracks[from..]
+        &self.tracks[self.upcoming_start()..]
+    }
+
+    /// Where the tracks still to come begin.
+    fn upcoming_start(&self) -> usize {
+        self.index.map_or(0, |i| i + 1).min(self.tracks.len())
     }
 
     /// Plays `tracks` from `start`; with shuffle on, the rest come shuffled.
@@ -79,14 +83,14 @@ impl Queue {
     }
 
     pub fn clear_upcoming(&mut self) {
-        let keep = self.index.map_or(0, |i| i + 1);
+        let keep = self.upcoming_start();
         self.tracks.truncate(keep);
     }
 
     pub fn set_shuffle(&mut self, on: bool) {
         self.shuffle = on;
         if on {
-            let from = self.index.map_or(0, |i| i + 1).min(self.tracks.len());
+            let from = self.upcoming_start();
             self.tracks[from..].shuffle(&mut rand::rng());
         }
     }
@@ -99,7 +103,8 @@ impl Queue {
         };
     }
 
-    /// Where playback goes when the current track ends by itself.
+    /// Where playback goes next: when the current track ends by itself
+    /// (`by_user` false) or on Next.
     fn next_index(&self, by_user: bool) -> Option<usize> {
         let index = self.index?;
         if self.repeat == Repeat::One && !by_user {
@@ -123,9 +128,7 @@ impl Queue {
     /// Next leaves a repeated track for the one after it.
     pub fn advance(&mut self, by_user: bool) -> Option<&Item> {
         let next = self.next_index(by_user)?;
-        let wrapped = self
-            .index
-            .is_some_and(|i| next == 0 && i + 1 >= self.tracks.len());
+        let wrapped = next == 0 && self.is_last();
         if wrapped && self.shuffle && self.tracks.len() > 2 {
             // A new order for the next pass, keeping the first track first:
             // it is the one the player was told comes next.

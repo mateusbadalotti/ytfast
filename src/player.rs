@@ -150,7 +150,7 @@ impl Player {
         self.position_ms.load(Ordering::Relaxed) as f64 / 1000.0
     }
 
-    /// The current track's length as its file tells it, once it plays.
+    /// The current track's length: the listing's until its file tells its own.
     pub fn length(&self) -> Option<f64> {
         let ms = self.length_ms.load(Ordering::Relaxed);
         (ms > 0).then(|| ms as f64 / 1000.0)
@@ -232,8 +232,7 @@ impl Engine {
                 paused,
             } => {
                 self.paused = paused;
-                self.position_ms
-                    .store((from * 1000.0) as u64, Ordering::Relaxed);
+                self.store_position(from);
                 self.store_length(track.duration);
                 self.fade_out_all(SKIP_FADE);
                 self.flush_output();
@@ -260,8 +259,7 @@ impl Engine {
                 self.apply_pause();
             }
             Command::Seek(seconds) => {
-                self.position_ms
-                    .store((seconds * 1000.0) as u64, Ordering::Relaxed);
+                self.store_position(seconds);
                 if let Some(voice) = lock(&self.mixer).current_mut() {
                     voice.seek(seconds);
                 }
@@ -284,6 +282,11 @@ impl Engine {
                 self.apply_pause();
             }
         }
+    }
+
+    fn store_position(&self, seconds: f64) {
+        self.position_ms
+            .store((seconds * 1000.0) as u64, Ordering::Relaxed);
     }
 
     fn store_length(&self, seconds: Option<f64>) {
@@ -343,7 +346,7 @@ impl Engine {
     /// in; with `fade_in`, from silence over that long.
     fn begin(&mut self, id: &str, from: f64, fade_in: Option<f32>) {
         let download = self.download(id);
-        let mut voice = Voice::new(id.to_string(), Box::new(download.reader()), from);
+        let mut voice = Voice::new(Box::new(download.reader()), from);
         let mut mixer = lock(&self.mixer);
         if let Some(seconds) = fade_in {
             let frames = mixer.frames(seconds);
@@ -395,7 +398,7 @@ impl Engine {
             };
             // Opus decodes at 48 kHz: asked for first, so it plays unresampled.
             let options = OutputOptions {
-                sample_rate: Some(48_000),
+                sample_rate: Some(crate::audio::OPUS_RATE),
                 ..OutputOptions::default()
             };
             match Output::open(options, renderer) {
@@ -422,8 +425,8 @@ impl Engine {
         if self.output.is_none() {
             match MacOutput::new(self.second_output.as_deref(), &self.mixer) {
                 Ok(output) => {
-                    output.set_volume(self.volume * self.volume);
                     self.output = Some(output);
+                    self.set_volume(self.volume);
                 }
                 Err(error) => {
                     log::warn!("no audio output: {error:#}");
@@ -460,8 +463,7 @@ impl Engine {
                 let ahead = output.ahead();
                 if let Some(voice) = lock(&self.mixer).current() {
                     let heard = (voice.position() - ahead).max(0.0);
-                    self.position_ms
-                        .store((heard * 1000.0) as u64, Ordering::Relaxed);
+                    self.store_position(heard);
                 }
             }
         }
@@ -535,7 +537,7 @@ impl Engine {
             return;
         };
         self.current = Some(next.clone());
-        self.position_ms.store(0, Ordering::Relaxed);
+        self.store_position(0.0);
         self.store_length(next.duration);
         (self.emit)(Event::Advanced {
             id: next.id.clone(),

@@ -127,13 +127,6 @@ fn track(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
 fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
     let x = rect.center().x;
     let y = rect.top() + BUTTONS_Y;
-    let on = |active: bool| {
-        if active {
-            theme::ACCENT_HOVER
-        } else {
-            theme::SECONDARY
-        }
-    };
     let at = |dx: f32, size: f32| Rect::from_center_size(pos2(x + dx, y), Vec2::splat(size));
     let queue = &app.settings.queue;
 
@@ -142,7 +135,7 @@ fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
         at(-98.0, 32.0),
         Icon::Shuffle,
         17.0,
-        on(queue.shuffle),
+        active_tint(queue.shuffle),
         "Shuffle",
     )
     .clicked()
@@ -203,7 +196,7 @@ fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
         at(98.0, 32.0),
         icon,
         17.0,
-        on(queue.repeat != Repeat::Off),
+        active_tint(queue.repeat != Repeat::Off),
         tip,
     )
     .clicked()
@@ -267,6 +260,15 @@ fn seek(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
     );
 }
 
+/// A toggle's icon colour: lit while its mode is on.
+fn active_tint(active: bool) -> Color32 {
+    if active {
+        theme::ACCENT_HOVER
+    } else {
+        theme::SECONDARY
+    }
+}
+
 fn extras(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     let mut volume = app.settings.volume;
     if widgets::slider(ui, &mut volume, 0.0..=1.0, VOLUME_WIDTH, false).changed() {
@@ -279,18 +281,11 @@ fn extras(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     };
     ui.add(icon.image(theme::SECONDARY, 18.0));
     ui.add_space(10.0);
-    let on = |active: bool| {
-        if active {
-            theme::ACCENT_HOVER
-        } else {
-            theme::SECONDARY
-        }
-    };
     if icon_button(
         ui,
         Icon::Queue,
         18.0,
-        on(app.side == Some(Side::Queue)),
+        active_tint(app.side == Some(Side::Queue)),
         "Up next",
     )
     .clicked()
@@ -305,7 +300,7 @@ fn extras(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         .is_some_and(|t| matches!(app.lyrics.get(&t.id), Some(Loadable::Loaded(None))));
     if none && !showing {
         widgets::icon_unavailable(ui, Icon::Lyrics, 18.0, "No lyrics for this track");
-    } else if icon_button(ui, Icon::Lyrics, 18.0, on(showing), "Lyrics").clicked() {
+    } else if icon_button(ui, Icon::Lyrics, 18.0, active_tint(showing), "Lyrics").clicked() {
         actions.push(Action::ToggleSide(Side::Lyrics));
     }
 }

@@ -125,6 +125,7 @@ pub enum Event {
     /// The library's playlists the signed-in person owns, by browse id.
     OwnPlaylists(std::collections::HashSet<String>),
     AddedToPlaylist {
+        playlist: String,
         title: String,
         result: Result<()>,
     },
@@ -190,7 +191,8 @@ impl Backend {
         self.runtime.handle().clone()
     }
 
-    /// A sender that also wakes the interface, for the player thread.
+    /// A sender that also wakes the interface. `run` and `save_art` send
+    /// through it, and the player thread gets one of its own.
     pub fn emitter(&self) -> impl Fn(Event) + Send + 'static {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         move |event| {

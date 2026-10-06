@@ -8,10 +8,11 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::innertube::{USER_AGENT, find_all, text};
+use crate::innertube::{API, USER_AGENT, find_all, text};
 use crate::model::{Item, LyricLine, Lyrics, LyricsText};
 
-const API: &str = "https://music.youtube.com/youtubei/v1";
+/// The Android app's version, which YouTube wants in the body and a header.
+const CLIENT_VERSION: &str = "7.21.50";
 /// Seconds an LRCLIB record's length may differ from the track's.
 const LENGTH_SLACK: f64 = 3.0;
 
@@ -36,7 +37,7 @@ pub async fn fetch(http: &reqwest::Client, track: &Item) -> Result<Option<Lyrics
 async fn android(http: &reqwest::Client, endpoint: &str, mut body: Value) -> Result<Value> {
     body["context"] = json!({ "client": {
         "clientName": "ANDROID_MUSIC",
-        "clientVersion": "7.21.50",
+        "clientVersion": CLIENT_VERSION,
         "androidSdkVersion": 34,
         "hl": "en",
         "gl": "US",
@@ -44,7 +45,7 @@ async fn android(http: &reqwest::Client, endpoint: &str, mut body: Value) -> Res
     let response = http
         .post(format!("{API}/{endpoint}?prettyPrint=false"))
         .header("X-YouTube-Client-Name", "21")
-        .header("X-YouTube-Client-Version", "7.21.50")
+        .header("X-YouTube-Client-Version", CLIENT_VERSION)
         .header("Origin", "https://music.youtube.com")
         .header("User-Agent", USER_AGENT)
         .json(&body)
@@ -200,13 +201,14 @@ async fn lrclib(http: &reqwest::Client, track: &Item) -> Result<Option<Lyrics>> 
         (Some(want), Some(got)) => (want - got).abs() <= LENGTH_SLACK,
         _ => true,
     };
-    if records.iter().filter(fits).any(|r| r.instrumental) {
+    let fitting: Vec<&Record> = records.iter().filter(fits).collect();
+    if fitting.iter().any(|r| r.instrumental) {
         return Ok(Some(Lyrics {
             text: LyricsText::Plain("Instrumental".into()),
             source: "LRCLIB",
         }));
     }
-    let synced = records.iter().filter(fits).find_map(|r| {
+    let synced = fitting.iter().find_map(|r| {
         r.synced_lyrics
             .as_deref()
             .map(parse_lrc)
@@ -218,9 +220,8 @@ async fn lrclib(http: &reqwest::Client, track: &Item) -> Result<Option<Lyrics>> 
             source: "LRCLIB",
         }));
     }
-    let plain = records
+    let plain = fitting
         .iter()
-        .filter(fits)
         .find_map(|r| r.plain_lyrics.clone().filter(|p| !p.trim().is_empty()));
     Ok(plain.map(|p| Lyrics {
         text: LyricsText::Plain(p),

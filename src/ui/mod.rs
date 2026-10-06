@@ -1,14 +1,14 @@
 //! Window layout: sidebar, player bar, side panel, the page, toasts.
 //!
-//! Views read the app and push `Action`s; nothing here changes the app's
-//! state directly.
+//! Views read the app and push `Action`s; apart from the search field's text
+//! and its focus request, nothing here changes the app's state directly.
 
 mod pages;
 mod player_bar;
 mod settings;
 mod side;
 mod sidebar;
-pub mod widgets;
+mod widgets;
 
 use egui::{Align, Frame, Id, Layout, Margin, Rect, RichText, Sense, Ui, ViewportCommand, vec2};
 

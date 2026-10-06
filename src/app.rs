@@ -19,7 +19,7 @@ use crate::images;
 use crate::lyrics;
 use crate::model::{
     Account, ArtistPage, Browse, Collection, Feed, Item, Kind, Loadable, Lyrics, Page, Rating,
-    SearchFilter, SearchResults, Shelf, Watch,
+    SearchFilter, SearchResults, Shelf, Watch, playlist_browse_id,
 };
 use crate::player::{self, Command, Player, TrackRef};
 use crate::queue::Repeat;
@@ -29,12 +29,18 @@ use crate::stream::Resolver;
 pub const LIBRARY_PLAYLISTS: &str = "FEmusic_liked_playlists";
 pub const LIBRARY_ALBUMS: &str = "FEmusic_liked_albums";
 pub const LIBRARY_ARTISTS: &str = "FEmusic_library_corpus_artists";
-pub const LIKED_SONGS: &str = "LM";
+/// Liked Music's browse id, which its page is filed under.
+const LIKED_MUSIC: &str = "VLLM";
 
 /// Previous restarts the track once it has played this long.
 const RESTART_AFTER: f64 = 3.0;
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 const TOAST_FOR: Duration = Duration::from_secs(4);
+/// How often a playing, loading or toasting window redraws.
+const REDRAW_EVERY: Duration = Duration::from_millis(200);
+/// Cover size sent to the desktop's Now Playing panels.
+const NOW_PLAYING_ART_PX: u32 = 544;
+const OWNERSHIP_CHECKS_AT_ONCE: usize = 4;
 /// Unplayable tracks skipped in a row before playback stops trying.
 const MAX_SKIPS: u32 = 3;
 /// Seconds a track plays before it goes to the YouTube history, so a skip
@@ -51,8 +57,6 @@ const RECENT_SEARCHES: usize = 10;
 const MENU_SEEK: f64 = 10.0;
 #[cfg(target_os = "macos")]
 const MENU_VOLUME_STEP: f32 = 0.05;
-#[cfg(target_os = "macos")]
-const LIKED_MUSIC: &str = "VLLM";
 #[cfg(target_os = "macos")]
 const REPO_URL: &str = "https://github.com/mateusbadalotti/ytfast";
 
@@ -178,7 +182,7 @@ pub enum Action {
 pub struct App {
     pub backend: Backend,
     pub player: Player,
-    controls: Option<NowPlaying>,
+    controls: NowPlaying,
     pub settings: Settings,
     dirty: bool,
     saved_at: Instant,
@@ -248,7 +252,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
         let ctx = cc.egui_ctx.clone();
         crate::theme::install(&ctx);
         // Built once, before the first frame; a pick wakes the loop so it is
@@ -259,13 +263,12 @@ impl App {
             let waker = ctx.clone();
             crate::mac_menu::set_waker(move || waker.request_repaint());
         }
-        let paths = Paths::new();
         let settings = Settings::load(&paths.state);
         let backend = match Backend::new(ctx.clone(), paths) {
             Ok(backend) => backend,
             Err(error) => panic!("could not start the network runtime: {error}"),
         };
-        ctx.add_bytes_loader(std::sync::Arc::new(images::Loader::new(
+        ctx.add_bytes_loader(Arc::new(images::Loader::new(
             backend.http.clone(),
             backend.handle(),
         )));
@@ -301,7 +304,7 @@ impl App {
             session_ready: false,
             backend,
             player,
-            controls: Some(controls),
+            controls,
             settings,
             dirty: false,
             saved_at: Instant::now(),
@@ -591,7 +594,7 @@ impl App {
                     let api = api.clone();
                     async move { api.owns_playlist(&id).await.unwrap_or(false).then_some(id) }
                 })
-                .buffer_unordered(4)
+                .buffer_unordered(OWNERSHIP_CHECKS_AT_ONCE)
                 .filter_map(|owned| async move { owned })
                 .collect()
                 .await;
@@ -664,7 +667,7 @@ impl App {
         // Asked again each time it plays: it may have changed elsewhere.
         self.rating_requests.remove(&track.id);
         self.request_rating(track.id.clone());
-        if let Some(url) = images::art_url(&track.thumbnails, 544) {
+        if let Some(url) = images::art_url(&track.thumbnails, NOW_PLAYING_ART_PX) {
             self.backend.save_art(track.id.clone(), url);
         }
         self.want_lyrics();
@@ -739,7 +742,6 @@ impl App {
                 self.search_text = self.search_query.clone();
                 self.remember_search();
                 self.open(Page::Search);
-                self.load_search();
             }
             Action::SearchFilter(filter) => {
                 self.search_filter = filter;
@@ -1010,12 +1012,14 @@ impl App {
                 video,
             } => {
                 self.toast(format!("Adding to “{title}”…"));
-                // Its page shows the new track when opened next.
-                self.collections.remove(&playlist_key(&playlist));
                 let api = self.backend.api.clone();
                 self.backend.run(async move {
                     let result = api.add_to_playlist(&playlist, &video).await;
-                    Event::AddedToPlaylist { title, result }
+                    Event::AddedToPlaylist {
+                        playlist,
+                        title,
+                        result,
+                    }
                 });
             }
             Action::AskDelete(item) => self.deleting = Some(item),
@@ -1306,10 +1310,7 @@ impl App {
                 }
             }
         }
-        if self.shows_shelf(HOME_LONG)
-            && self.signed_in
-            && matches!(self.long_listens, Loadable::NotLoaded)
-        {
+        if self.shows_shelf(HOME_LONG) && self.signed_in && self.long_listens.needs_load() {
             self.long_listens = Loadable::Loading;
             let api = self.backend.api.clone();
             let picked: Vec<String> = self
@@ -1344,6 +1345,15 @@ impl App {
             .iter()
             .find(|a| Some(&a.id) == self.sets_artist.as_ref())
             .or(artists.first())
+    }
+
+    /// Drops a collection's page, which the server has changed, and loads it
+    /// again at once when it is the one on screen; otherwise when it opens.
+    fn reload_collection(&mut self, id: &str) {
+        self.collections.remove(id);
+        if matches!(&self.page, Page::Album(shown) | Page::Playlist(shown) if shown == id) {
+            self.ensure_loaded(&self.page.clone());
+        }
     }
 
     fn load_artist(&mut self, id: &str) {
@@ -1439,6 +1449,11 @@ impl App {
     fn play_song(&mut self, item: Item) {
         let seed = item.id.clone();
         self.play_all(vec![item], 0, None);
+        // With autoplay on, playing just this track has already asked for
+        // its radio.
+        if self.autoplay_for.as_ref() == Some(&seed) {
+            return;
+        }
         self.autoplay_for = Some(seed.clone());
         let api = self.backend.api.clone();
         self.backend.run(async move {
@@ -1450,7 +1465,7 @@ impl App {
     }
 
     fn play_collection(&mut self, tracks: Vec<Item>, shuffle: bool, id: String) {
-        if shuffle && !self.settings.queue.shuffle {
+        if shuffle {
             self.settings.queue.shuffle = true;
         }
         let start = if shuffle {
@@ -1513,7 +1528,8 @@ impl App {
                             .filter(|t| !collection.tracks.iter().any(|c| c.id == t.id))
                             .collect();
                         collection.tracks.extend(fresh.iter().cloned());
-                        collection.continuation = next.clone().filter(|_| !fresh.is_empty());
+                        let next = next.filter(|_| !fresh.is_empty());
+                        collection.continuation = next.clone();
                         if self.queue_source.as_ref() == Some(&id) {
                             self.settings.queue.add(fresh);
                             if self.settings.queue.shuffle {
@@ -1521,12 +1537,7 @@ impl App {
                             }
                             self.queue_edited();
                         }
-                        if let Some(token) = self
-                            .collections
-                            .get(&id)
-                            .and_then(Loadable::get)
-                            .and_then(|c| c.continuation.clone())
-                        {
+                        if let Some(token) = next {
                             self.load_collection_more(id, token);
                         }
                     }
@@ -1593,8 +1604,16 @@ impl App {
                 );
                 self.own_playlists = owned;
             }
-            Event::AddedToPlaylist { title, result } => match result {
-                Ok(()) => self.toast(format!("Added to “{title}”")),
+            Event::AddedToPlaylist {
+                playlist,
+                title,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.toast(format!("Added to “{title}”"));
+                    // Its page shows the new track.
+                    self.reload_collection(&playlist_browse_id(&playlist));
+                }
                 Err(error) => self.toast(format!("Could not add to “{title}”: {error:#}")),
             },
             Event::PlaylistDeleted { id, title, result } => match result {
@@ -1632,7 +1651,7 @@ impl App {
                     self.request_rating(id);
                 } else {
                     // Liked songs is a playlist the server rebuilds: load it again.
-                    self.collections.remove(LIKED_SONGS);
+                    self.reload_collection(LIKED_MUSIC);
                 }
             }
             Event::Lyrics { id, result } => {
@@ -1796,10 +1815,7 @@ impl App {
     // Desktop media controls
 
     fn sync_controls(&mut self, ctx: &egui::Context) {
-        let Some(mut controls) = self.controls.take() else {
-            return;
-        };
-        for command in controls.commands() {
+        for command in self.controls.commands() {
             let action = match command {
                 now_playing::Command::Play if !self.playing => Action::TogglePlay,
                 now_playing::Command::Pause | now_playing::Command::Stop if self.playing => {
@@ -1809,7 +1825,7 @@ impl App {
                 now_playing::Command::Next => Action::Next,
                 now_playing::Command::Previous => Action::Previous,
                 now_playing::Command::SeekBy(ms) => {
-                    Action::Seek(self.player.position() + ms as f64 / 1000.0)
+                    Action::Seek(self.position() + ms as f64 / 1000.0)
                 }
                 now_playing::Command::SetPosition { position, .. } => {
                     Action::Seek(position.as_secs_f64())
@@ -1846,8 +1862,8 @@ impl App {
                 .as_ref()
                 .filter(|(id, _)| *id == t.id)
                 .map(|(_, p)| p.clone()),
-            art_url: images::art_url(&t.thumbnails, 544),
-            url: Some(format!("https://music.youtube.com/watch?v={}", t.id)),
+            art_url: images::art_url(&t.thumbnails, NOW_PLAYING_ART_PX),
+            url: Some(t.link()),
             ..now_playing::Track::default()
         });
         let state = now_playing::State {
@@ -1857,7 +1873,7 @@ impl App {
                 (_, false) => now_playing::Playback::Paused,
             },
             track,
-            position: Duration::from_secs_f64(self.player.position()),
+            position: Duration::from_secs_f64(self.position()),
             volume: Some(f64::from(self.settings.volume)),
             shuffle: Some(queue.shuffle),
             repeat: Some(match queue.repeat {
@@ -1870,26 +1886,16 @@ impl App {
                 ..Default::default()
             },
         };
-        controls.update(state);
-        self.controls = Some(controls);
+        self.controls.update(state);
     }
 
     fn save(&mut self) {
-        self.settings.position = self.player.position();
+        self.settings.position = self.position();
         if let Err(error) = self.settings.save(&self.backend.paths.state) {
             log::warn!("could not save state: {error}");
         }
         self.dirty = false;
         self.saved_at = Instant::now();
-    }
-}
-
-/// The key a playlist's page is filed under: its browse id.
-fn playlist_key(id: &str) -> String {
-    if id.starts_with("VL") {
-        id.to_string()
-    } else {
-        format!("VL{id}")
     }
 }
 
@@ -1930,7 +1936,7 @@ impl eframe::App for App {
             self.save();
         }
         if self.playing || !self.toasts.is_empty() || self.loading {
-            ctx.request_repaint_after(Duration::from_millis(200));
+            ctx.request_repaint_after(REDRAW_EVERY);
         }
     }
 

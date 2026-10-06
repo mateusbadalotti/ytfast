@@ -78,6 +78,16 @@ pub struct Browse {
     pub params: Option<String>,
 }
 
+/// A playlist's browse id, which its page is also filed under: the id with
+/// YouTube's `VL` prefix.
+pub fn playlist_browse_id(id: &str) -> String {
+    if id.starts_with("VL") {
+        id.to_string()
+    } else {
+        format!("VL{id}")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shelf {
     pub title: String,
@@ -98,7 +108,6 @@ pub struct Feed {
 /// An album or a playlist: a header and its tracks.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Collection {
-    pub id: String,
     pub title: String,
     pub artists: Vec<Link>,
     /// "Album • 2024" or the playlist's owner line.
@@ -121,7 +130,6 @@ pub struct Watch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ArtistPage {
-    pub id: String,
     pub name: String,
     pub description: String,
     pub audience: String,

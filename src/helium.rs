@@ -4,8 +4,9 @@
 //!
 //! yt-dlp finds each Chromium browser's password by a Keychain name it knows
 //! ("Chrome Safe Storage", …). Helium files its own as "Helium Storage Key",
-//! so it is read here instead. The SQLite file goes through the `sqlite3`
-//! and `security` tools macOS ships, so no database library is built in.
+//! so it is read here instead. The SQLite file is read with the `sqlite3`
+//! tool and the Keychain password with `security`, both shipped with macOS,
+//! so no database library is built in.
 
 use std::path::{Path, PathBuf};
 
@@ -163,23 +164,26 @@ fn from_hex(hex: &str) -> Vec<u8> {
         .collect()
 }
 
+/// AES's block size, in bytes.
+const BLOCK: usize = 16;
+
 /// A `v10` value: AES-128-CBC with an IV of sixteen spaces, PKCS#7 padded.
 fn decrypt(key: &[u8; 16], data: &[u8], domain_hash: bool) -> Option<String> {
     let body = data.strip_prefix(b"v10")?;
-    if body.is_empty() || body.len() % 16 != 0 {
+    if body.is_empty() || body.len() % BLOCK != 0 {
         return None;
     }
     let cipher = Aes128::new(GenericArray::from_slice(key));
-    let mut previous = [b' '; 16];
+    let mut previous = [b' '; BLOCK];
     let mut plain = Vec::with_capacity(body.len());
-    for chunk in body.chunks(16) {
+    for chunk in body.chunks(BLOCK) {
         let mut block = GenericArray::clone_from_slice(chunk);
         cipher.decrypt_block(&mut block);
         plain.extend(block.iter().zip(previous).map(|(b, p)| b ^ p));
         previous.copy_from_slice(chunk);
     }
     let pad = usize::from(*plain.last()?);
-    if pad == 0 || pad > 16 || pad > plain.len() {
+    if pad == 0 || pad > BLOCK || pad > plain.len() {
         return None;
     }
     plain.truncate(plain.len() - pad);
@@ -199,12 +203,12 @@ mod tests {
     /// What Chromium writes: `v10` + AES-128-CBC(PKCS#7(plain)).
     fn encrypt(key: &[u8; 16], plain: &[u8]) -> Vec<u8> {
         let cipher = Aes128::new(GenericArray::from_slice(key));
-        let pad = 16 - plain.len() % 16;
+        let pad = BLOCK - plain.len() % BLOCK;
         let mut data = plain.to_vec();
         data.extend(std::iter::repeat_n(pad as u8, pad));
-        let mut previous = [b' '; 16];
+        let mut previous = [b' '; BLOCK];
         let mut out = b"v10".to_vec();
-        for chunk in data.chunks(16) {
+        for chunk in data.chunks(BLOCK) {
             let mut block = GenericArray::clone_from_slice(chunk);
             for (b, p) in block.iter_mut().zip(previous) {
                 *b ^= p;

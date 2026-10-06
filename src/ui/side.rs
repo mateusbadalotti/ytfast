@@ -73,10 +73,7 @@ fn queue(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (at, item) in queue.tracks.iter().enumerate() {
-                if current.is_some_and(|c| at < c) {
-                    continue;
-                }
+            for (at, item) in queue.tracks.iter().enumerate().skip(current.unwrap_or(0)) {
                 if current.is_some_and(|c| at == c + 1) {
                     ui.add_space(10.0);
                     ui.label(

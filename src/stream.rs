@@ -56,7 +56,8 @@ const WARM_QUEUE: usize = 4;
 /// googlevideo throttles an open-ended range to a trickle (~30 KB/s) and
 /// serves bounded ones at full speed, so every request names its end.
 const CHUNK: u64 = 4 * 1024 * 1024;
-/// The first chunk: a few seconds of audio, enough to start playing.
+/// The first chunk: small enough to arrive at once, and well over ten seconds
+/// of audio.
 const FIRST_CHUNK: u64 = 512 * 1024;
 const RESOLVED_FOR: Duration = Duration::from_secs(30 * 60);
 const LANES: usize = 6;
@@ -153,8 +154,8 @@ async fn install(part: &Path, bin_dir: &Path) -> Result<()> {
     let target = bin_dir.join("yt-dlp_macos");
     let _ = tokio::fs::remove_dir_all(&target).await;
     tokio::fs::rename(&staging, &target).await?;
-    // touch: the directory's age is what `ensure` reads.
-    let entry = target.join("yt-dlp_macos");
+    // touch: `ensure` reads the binary's age (`MANAGED`), not the directory's.
+    let entry = bin_dir.join(MANAGED);
     std::fs::File::options()
         .write(true)
         .open(&entry)?
@@ -416,15 +417,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Where chunk `index` starts and ends (exclusive). The first is small, so
 /// the first sound needs only a fraction of a second of download.
 fn chunk_bounds(index: usize, size: u64) -> (u64, u64) {
-    let start = if index == 0 {
-        0
+    let (start, end) = if index == 0 {
+        (0, FIRST_CHUNK)
     } else {
-        FIRST_CHUNK + (index as u64 - 1) * CHUNK
-    };
-    let end = if index == 0 {
-        FIRST_CHUNK
-    } else {
-        start + CHUNK
+        let start = FIRST_CHUNK + (index as u64 - 1) * CHUNK;
+        (start, start + CHUNK)
     };
     (start.min(size), end.min(size))
 }
@@ -685,7 +682,7 @@ async fn fetch_range(
                     Err(error) => last = Some(error),
                 }
             }
-            Err(error) if error.status().is_some_and(|s| s.as_u16() == 403) => {
+            Err(error) if error.status() == Some(reqwest::StatusCode::FORBIDDEN) => {
                 bail!("googlevideo answered 403")
             }
             Err(error) => last = Some(error.without_url()),

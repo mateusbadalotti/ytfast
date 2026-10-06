@@ -30,6 +30,8 @@ pub const SIDE_PANEL_WIDTH: f32 = 360.0;
 pub const PAGE_MARGIN: f32 = 32.0;
 pub const CARD_WIDTH: f32 = 176.0;
 pub const ROW_HEIGHT: f32 = 56.0;
+/// The display size of a page's title.
+pub const PAGE_TITLE: f32 = 34.0;
 pub const RADIUS: u8 = 8;
 
 const DISPLAY: &str = "display";
@@ -53,8 +55,6 @@ fastframe_icons::icons! {
         AddToQueue => "list-end",
         AddTo => "list-plus",
         Radio => "radio",
-        Loading => "loader-circle",
-        Explore => "compass",
         Lyrics => "mic-vocal",
         Like => "thumbs-up",
         Liked => "thumbs-up-filled",
@@ -67,7 +67,6 @@ fastframe_icons::icons! {
         Back => lucide "chevron-left",
         Forward => lucide "chevron-right",
         Close => lucide "x",
-        More => lucide "ellipsis",
         User => lucide "user",
         LogOut => lucide "log-out",
         Refresh => lucide "refresh-cw",
