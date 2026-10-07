@@ -15,7 +15,6 @@ const ART_MAX: f32 = 390.0;
 /// The art's share of the room it could fill: it leaves the view some air.
 const ART_SCALE: f32 = 0.7;
 const ART_MIN: f32 = 160.0;
-const ART_TOP_MARGIN: f32 = 25.0;
 const TITLE_SIZE: f32 = 28.0;
 const TITLE_GAP: f32 = 22.0;
 /// The artists, or the video's details, sit this far above the player.
@@ -63,17 +62,13 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             // The art and the title under it, as one block in the middle.
             let art = ((body.width() * 0.85).min(body.height() - text_room) * ART_SCALE)
                 .clamp(ART_MIN, ART_MAX);
-            let block = Rect::from_center_size(
-                body.center(),
-                vec2(body.width(), ART_TOP_MARGIN + art + text_room),
-            );
+            let block = Rect::from_center_size(body.center(), vec2(body.width(), art + text_room));
             let mut column = ui.new_child(
                 UiBuilder::new()
                     .id_salt("now-playing-track")
                     .max_rect(block)
                     .layout(Layout::top_down(Align::Center)),
             );
-            column.add_space(ART_TOP_MARGIN);
             let (cover, _) = column.allocate_exact_size(Vec2::splat(art), Sense::hover());
             widgets::paint_cover(&column, cover, &track.thumbnails, 14.0);
             column.add_space(TITLE_GAP);
@@ -83,10 +78,10 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
 
             // Placed by its bottom edge, which an area knows once it is laid out.
             egui::Area::new(Id::new("now-playing-details"))
-                .pivot(Align2::LEFT_BOTTOM)
-                .fixed_pos(pos2(cover.left(), rect.bottom() - DETAILS_GAP))
+                .pivot(Align2::CENTER_BOTTOM)
+                .fixed_pos(pos2(body.center().x, rect.bottom() - DETAILS_GAP))
                 .show(ui.ctx(), |ui| {
-                    ui.set_max_width(body.right() - cover.left());
+                    ui.set_max_width(body.width());
                     widgets::artist_links_wrapped(ui, track, 17.0, theme::SECONDARY, actions);
                 });
         });
