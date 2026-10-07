@@ -1080,9 +1080,110 @@ pub fn card_grid(ui: &mut Ui, items: &[Item], app: &App, actions: &mut Vec<Actio
     });
 }
 
+/// Turns a second of the spinner's arc, and the points that draw it.
+const SPIN_TURNS: f64 = 0.85;
+const ARC_POINTS: usize = 24;
+/// How fast placeholders glow, and how far the glow trails along a row.
+const GLOW_SPEED: f64 = 3.0;
+const GLOW_STAGGER: f64 = 0.35;
+const LOADING_SHELVES: usize = 2;
+const SKELETON_HEADING: f32 = 220.0;
+const CARD_GAP: f32 = 18.0;
+
+/// A faint ring with an arc running round it: a short wait in a small place.
+pub fn spinner(ui: &mut Ui, size: f32, color: Color32) -> Rect {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_spinner(ui, rect, color);
+    rect
+}
+
+pub fn paint_spinner(ui: &Ui, rect: Rect, color: Color32) {
+    ui.ctx().request_repaint();
+    let time = ui.input(|i| i.time);
+    let width = (rect.width() * 0.11).max(1.5);
+    let radius = rect.width() / 2.0 - width / 2.0;
+    let center = rect.center();
+    ui.painter().circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(width, color.gamma_multiply(0.2)),
+    );
+    let start = (time * SPIN_TURNS * std::f64::consts::TAU) as f32;
+    // The arc breathes as it turns, a quarter turn give or take.
+    let sweep = std::f32::consts::TAU * (0.25 + 0.1 * (time * 2.4).sin() as f32);
+    let points: Vec<egui::Pos2> = (0..=ARC_POINTS)
+        .map(|i| {
+            let angle = start + sweep * i as f32 / ARC_POINTS as f32;
+            center + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    for end in [points[0], points[ARC_POINTS]] {
+        ui.painter().circle_filled(end, width / 2.0, color);
+    }
+    ui.painter()
+        .add(egui::Shape::line(points, egui::Stroke::new(width, color)));
+}
+
+/// A placeholder that glows softly while what it stands for loads; `index`
+/// staggers the glow, so it runs along a row of them.
+pub fn skeleton(ui: &Ui, rect: Rect, radius: f32, index: usize) {
+    ui.ctx().request_repaint();
+    let time = ui.input(|i| i.time);
+    let glow = ((time * GLOW_SPEED - index as f64 * GLOW_STAGGER).sin() * 0.5 + 0.5) as f32;
+    let fill = theme::SURFACE.lerp_to_gamma(theme::SURFACE_HOVER, glow);
+    ui.painter().rect_filled(rect, radius, fill);
+}
+
+/// `skeleton` in a place of its own in the layout.
+pub fn skeleton_block(ui: &mut Ui, size: Vec2, radius: f32, index: usize) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    skeleton(ui, rect, radius, index);
+}
+
+/// A row of cards while it loads.
+pub fn loading_cards(ui: &mut Ui) {
+    let count = ((ui.available_width() + CARD_GAP) / (theme::CARD_WIDTH + CARD_GAP))
+        .floor()
+        .max(1.0) as usize;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = CARD_GAP;
+        for i in 0..count {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                skeleton_block(ui, Vec2::splat(theme::CARD_WIDTH), 6.0, i);
+                skeleton_block(ui, vec2(theme::CARD_WIDTH * 0.8, 12.0), 6.0, i);
+                skeleton_block(ui, vec2(theme::CARD_WIDTH * 0.5, 10.0), 5.0, i);
+            });
+        }
+    });
+}
+
+/// Track rows while they load, their lines of differing lengths.
+pub fn loading_rows(ui: &mut Ui, rows: usize) {
+    const LENGTHS: [f32; 4] = [0.34, 0.26, 0.4, 0.3];
+    for i in 0..rows {
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(vec2(width, theme::ROW_HEIGHT), Sense::hover());
+        let art = Rect::from_min_size(rect.left_center() + vec2(8.0, -20.0), Vec2::splat(40.0));
+        skeleton(ui, art, 4.0, i);
+        let line = (width * LENGTHS[i % LENGTHS.len()]).min(340.0);
+        let x = art.right() + 14.0;
+        let title = Rect::from_min_size(pos2(x, rect.center().y - 12.0), vec2(line, 11.0));
+        let subtitle = Rect::from_min_size(pos2(x, rect.center().y + 5.0), vec2(line * 0.55, 9.0));
+        skeleton(ui, title, 5.0, i);
+        skeleton(ui, subtitle, 4.5, i);
+    }
+}
+
+/// A page of shelves while it loads.
 pub fn loading(ui: &mut Ui) {
-    ui.add_space(40.0);
-    ui.vertical_centered(|ui| ui.add(egui::Spinner::new().size(28.0).color(theme::ACCENT)));
+    ui.add_space(8.0);
+    for shelf in 0..LOADING_SHELVES {
+        skeleton_block(ui, vec2(SKELETON_HEADING, 22.0), 8.0, shelf);
+        ui.add_space(16.0);
+        loading_cards(ui);
+        ui.add_space(30.0);
+    }
 }
 
 /// An error with a retry button.

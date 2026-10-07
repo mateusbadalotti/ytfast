@@ -135,10 +135,10 @@ fn choice(ui: &mut Ui, label: &str, selected: bool) -> bool {
 /// A spinner that asks for more once it scrolls into view.
 fn load_more(ui: &mut Ui, action: Action, actions: &mut Vec<Action>) {
     ui.add_space(12.0);
-    let response = ui
-        .vertical_centered(|ui| ui.add(egui::Spinner::new().color(theme::ACCENT)))
+    let spinner = ui
+        .vertical_centered(|ui| widgets::spinner(ui, LOAD_MORE_SPINNER, theme::ACCENT))
         .inner;
-    if ui.is_rect_visible(response.rect) {
+    if ui.is_rect_visible(spinner) {
         actions.push(action);
     }
 }
@@ -227,7 +227,7 @@ fn sets_shelf(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             Some(Loadable::Failed(error)) => format!("Could not look up sets: {error}"),
             Some(Loadable::Loaded(_)) => return,
             _ => {
-                ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
+                widgets::loading_cards(ui);
                 return;
             }
         };
@@ -288,6 +288,11 @@ fn new_releases(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
 
 /// An artist's description shown before "More".
 const DESCRIPTION_CHARS: usize = 320;
+/// Rows a loading track list shows.
+const SKELETON_ROWS: usize = 8;
+const LOAD_MORE_SPINNER: f32 = 24.0;
+/// The art in a playlist or album header.
+const COLLECTION_ART: f32 = 210.0;
 const NEW_SINGLES: usize = 6;
 const NEW_ALBUMS: usize = 4;
 const NEW_TOP_SONGS: usize = 6;
@@ -318,7 +323,7 @@ pub fn search(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     let results = match app.searches.get(&key) {
         Some(Loadable::Loaded(results)) => results,
         Some(Loadable::Failed(error)) => return failed(ui, error, Page::Search, actions),
-        _ => return loading(ui),
+        _ => return widgets::loading_rows(ui, SKELETON_ROWS),
     };
     let since = since(ui, &key);
     if results.top.is_none() && results.shelves.is_empty() {
@@ -543,7 +548,7 @@ pub fn collection(ui: &mut Ui, app: &App, id: &str, page: &Page, actions: &mut V
     let collection = match app.collections.get(id) {
         Some(Loadable::Loaded(collection)) => collection,
         Some(Loadable::Failed(error)) => return failed(ui, error, page.clone(), actions),
-        _ => return loading(ui),
+        _ => return loading_collection(ui),
     };
     ui.add_space(12.0);
     collection_header(ui, id, collection, album, actions);
@@ -560,8 +565,27 @@ pub fn collection(ui: &mut Ui, app: &App, id: &str, page: &Page, actions: &mut V
     }
     if collection.continuation.is_some() {
         ui.add_space(12.0);
-        ui.vertical_centered(|ui| ui.add(egui::Spinner::new().color(theme::ACCENT)));
+        ui.vertical_centered(|ui| widgets::spinner(ui, LOAD_MORE_SPINNER, theme::ACCENT));
     }
+}
+
+/// A playlist or album page while it loads: its header, then its rows.
+fn loading_collection(ui: &mut Ui) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        widgets::skeleton_block(ui, Vec2::splat(COLLECTION_ART), 10.0, 0);
+        ui.add_space(24.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.add_space(60.0);
+            for (i, width) in [80.0, 340.0, 220.0, 160.0].into_iter().enumerate() {
+                let height = if i == 1 { 30.0 } else { 12.0 };
+                widgets::skeleton_block(ui, vec2(width, height), 6.0, i + 1);
+            }
+        });
+    });
+    ui.add_space(24.0);
+    widgets::loading_rows(ui, SKELETON_ROWS);
 }
 
 pub fn artist(ui: &mut Ui, app: &App, id: &str, actions: &mut Vec<Action>) {
@@ -570,7 +594,13 @@ pub fn artist(ui: &mut Ui, app: &App, id: &str, actions: &mut Vec<Action>) {
         Some(Loadable::Failed(error)) => {
             return failed(ui, error, Page::Artist(id.to_string()), actions);
         }
-        _ => return loading(ui),
+        _ => {
+            let width = ui.available_width();
+            let height = (width * 0.34).clamp(220.0, 340.0);
+            widgets::skeleton_block(ui, vec2(width, height), 14.0, 0);
+            ui.add_space(24.0);
+            return widgets::loading_rows(ui, SKELETON_ROWS);
+        }
     };
     let width = ui.available_width();
     let height = (width * 0.34).clamp(220.0, 340.0);

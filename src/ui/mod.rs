@@ -289,9 +289,10 @@ fn update_notice(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                             theme::ACCENT,
                         );
                         if matches!(app.update, UpdateNotice::Installing { .. }) {
-                            ui.put(
+                            widgets::paint_spinner(
+                                ui,
                                 Rect::from_center_size(badge.center(), egui::Vec2::splat(18.0)),
-                                egui::Spinner::new().size(18.0).color(egui::Color32::WHITE),
+                                egui::Color32::WHITE,
                             );
                         } else {
                             icon.image(egui::Color32::WHITE, 18.0).paint_at(

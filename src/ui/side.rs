@@ -108,6 +108,17 @@ fn queue(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         });
 }
 
+/// Lines of differing lengths, while the lyrics load.
+fn loading_lyrics(ui: &mut Ui) {
+    const LENGTHS: [f32; 8] = [0.7, 0.55, 0.85, 0.6, 0.75, 0.5, 0.8, 0.65];
+    ui.add_space(40.0);
+    let width = ui.available_width();
+    for (i, length) in LENGTHS.into_iter().enumerate() {
+        widgets::skeleton_block(ui, vec2(width * length, 16.0), 8.0, i);
+        ui.add_space(14.0);
+    }
+}
+
 /// The lyrics' line size in the panel; the line playing is a little larger.
 const SIDE_LYRICS: f32 = 18.0;
 
@@ -138,7 +149,7 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, size: f32) {
             });
             return;
         }
-        _ => return widgets::loading(ui),
+        _ => return loading_lyrics(ui),
     };
     let position = app.position() as f32;
     // Each view of the lyrics scrolls and follows the song on its own.

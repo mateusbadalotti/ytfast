@@ -223,7 +223,7 @@ fn account(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         |ui| {
             if app.signing_in {
                 ui.label(RichText::new("Reading the session…").color(theme::SECONDARY));
-                ui.add(egui::Spinner::new().color(theme::ACCENT));
+                widgets::spinner(ui, 18.0, theme::ACCENT);
             } else if pill(ui, Some(Icon::User), "Sign in", true).clicked() {
                 actions.push(Action::SignIn);
             }
@@ -355,7 +355,7 @@ fn home_artists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             }
         }
         Some(Loadable::Failed(error)) => note(ui, &format!("Could not look that up: {error}")),
-        _ => _ = ui.add(egui::Spinner::new().color(theme::ACCENT)),
+        _ => _ = widgets::spinner(ui, 18.0, theme::ACCENT),
     }
     ui.add_space(12.0);
 }
@@ -405,7 +405,7 @@ fn home_sections(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     // Settings is open.
     if app.home.get().is_none_or(|f| f.continuation.is_some()) {
         ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new().size(16.0).color(theme::ACCENT));
+            widgets::spinner(ui, 16.0, theme::ACCENT);
             note(ui, "Loading the rest of YouTube's sections…");
         });
     }

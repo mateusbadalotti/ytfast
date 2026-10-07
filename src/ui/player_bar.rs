@@ -161,9 +161,10 @@ fn transport(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
     };
     ui.painter().circle_filled(play.center(), PLAY_RADIUS, fill);
     if app.loading && app.playing {
-        ui.put(
+        widgets::paint_spinner(
+            ui,
             Rect::from_center_size(play.center(), Vec2::splat(18.0)),
-            egui::Spinner::new().size(18.0).color(Color32::WHITE),
+            Color32::WHITE,
         );
     } else {
         let icon = if app.playing { Icon::Pause } else { Icon::Play };

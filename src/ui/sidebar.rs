@@ -10,6 +10,8 @@ use crate::theme::{self, Icon};
 use crate::ui::widgets;
 
 const PIN_ICON: f32 = 12.0;
+/// Rows the playlists show while the library loads.
+const SKELETON_PLAYLISTS: usize = 6;
 const SIDEBAR_PHOTO: f32 = 26.0;
 const PIN_SPACE: f32 = 18.0;
 
@@ -204,7 +206,19 @@ fn playlists(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             }
         }
         Some(Loadable::Loading) => {
-            ui.add(egui::Spinner::new().color(theme::ACCENT));
+            for i in 0..SKELETON_PLAYLISTS {
+                let (rect, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+                let art = Rect::from_min_size(rect.min + vec2(6.0, 5.0), Vec2::splat(36.0));
+                widgets::skeleton(ui, art, 4.0, i);
+                let x = art.max.x + 10.0;
+                let title =
+                    Rect::from_min_size(egui::pos2(x, rect.min.y + 12.0), vec2(110.0, 10.0));
+                let subtitle =
+                    Rect::from_min_size(egui::pos2(x, rect.min.y + 27.0), vec2(70.0, 8.0));
+                widgets::skeleton(ui, title, 5.0, i);
+                widgets::skeleton(ui, subtitle, 4.0, i);
+            }
         }
         _ => {}
     }
