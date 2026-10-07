@@ -62,7 +62,7 @@ const MENU_VOLUME_STEP: f32 = 0.05;
 const REPO_URL: &str = "https://github.com/mateusbadalotti/ytfast";
 /// How long the corner card counts down before reopening into an update.
 #[cfg(target_os = "macos")]
-const RESTART_AFTER: Duration = Duration::from_secs(4);
+const UPDATE_RESTART_IN: Duration = Duration::from_secs(4);
 /// How long the corner card says the app was updated.
 const UPDATED_NOTICE_FOR: Duration = Duration::from_secs(10);
 
@@ -1888,7 +1888,7 @@ impl App {
         match result {
             Ok(bundle) => {
                 log::info!("updated to {version}");
-                let restart_at = (!self.playing).then(|| Instant::now() + RESTART_AFTER);
+                let restart_at = (!self.playing).then(|| Instant::now() + UPDATE_RESTART_IN);
                 self.update = UpdateNotice::Ready {
                     version,
                     bundle,
