@@ -163,29 +163,40 @@ pub fn pill(ui: &mut Ui, icon: Option<Icon>, text: &str, primary: bool) -> Respo
     .on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// The part of a still to show in a box of `aspect`: centred, and for
-/// YouTube's 4:3 stills, inside their letterbox bars.
-/// Pixels of the copy a backdrop is stretched from.
-const BACKDROP_PX: u32 = 32;
-
-/// The art from a tiny copy stretched over `rect`, which blurs it: a
-/// backdrop, not a picture.
+/// The art over `rect` with all the detail the screen can show: sized to the
+/// monitor, not the window, so resizing loads nothing new.
 pub fn paint_backdrop(ui: &Ui, rect: Rect, thumbnails: &[Thumbnail]) {
-    let Some(thumbnail) = images::pick(thumbnails, BACKDROP_PX) else {
-        return;
-    };
-    egui::Image::new(images::sized_url(thumbnail, BACKDROP_PX))
-        .uv(crop(thumbnail, rect.width() / rect.height()))
-        .paint_at(ui, rect);
+    let screen = ui
+        .ctx()
+        .input(|i| i.viewport().monitor_size)
+        .unwrap_or(rect.size());
+    let px = (screen.x.max(screen.y) * ui.ctx().pixels_per_point()) as u32;
+    let uri = images::still(thumbnails, images::LARGEST_STILL)
+        .or_else(|| images::art_url(thumbnails, px));
+    if let Some(uri) = uri {
+        paint_image(ui, rect, &uri, 0.0);
+    }
 }
 
-fn crop(thumbnail: &Thumbnail, aspect: f32) -> Rect {
+/// `uri` over `rect`, cropped by the size the image turned out to be.
+fn paint_image(ui: &Ui, rect: Rect, uri: &str, radius: f32) {
+    let mut image = egui::Image::new(uri).corner_radius(radius);
+    if let Some(size) = image
+        .load_for_size(ui.ctx(), rect.size())
+        .ok()
+        .and_then(|texture| texture.size())
+    {
+        image = image.uv(crop(uri, size, rect.width() / rect.height()));
+    }
+    image.paint_at(ui, rect);
+}
+
+/// The part of a still to show in a box of `aspect`: centred, and for
+/// YouTube's 4:3 stills, inside their letterbox bars.
+fn crop(uri: &str, size: Vec2, aspect: f32) -> Rect {
     let mut uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    let (w, mut h) = (
-        thumbnail.width.max(1) as f32,
-        thumbnail.height.max(1) as f32,
-    );
-    if thumbnail.url.contains("i.ytimg.com") && (w * 3.0 - h * 4.0).abs() < 2.0 {
+    let (w, mut h) = (size.x.max(1.0), size.y.max(1.0));
+    if uri.contains("i.ytimg.com") && (w * 3.0 - h * 4.0).abs() < 2.0 {
         uv.min.y = 0.125;
         uv.max.y = 0.875;
         h *= 0.75;
@@ -209,13 +220,19 @@ fn crop(thumbnail: &Thumbnail, aspect: f32) -> Rect {
 pub fn paint_art(ui: &Ui, rect: Rect, thumbnails: &[Thumbnail], radius: f32) {
     ui.painter().rect_filled(rect, radius, theme::SURFACE);
     let px = (rect.width().max(rect.height()) * ui.ctx().pixels_per_point()) as u32;
-    let Some(thumbnail) = images::pick(thumbnails, px) else {
-        return;
+    if let Some(uri) = images::art_url(thumbnails, px) {
+        paint_image(ui, rect, &uri, radius);
+    }
+}
+
+/// The art with all the detail there is: a video's largest still, which
+/// every listed copy is smaller than.
+pub fn paint_cover(ui: &Ui, rect: Rect, thumbnails: &[Thumbnail], radius: f32) {
+    let Some(uri) = images::still(thumbnails, images::LARGEST_STILL) else {
+        return paint_art(ui, rect, thumbnails, radius);
     };
-    egui::Image::new(images::sized_url(thumbnail, px))
-        .uv(crop(thumbnail, rect.width() / rect.height()))
-        .corner_radius(radius)
-        .paint_at(ui, rect);
+    ui.painter().rect_filled(rect, radius, theme::SURFACE);
+    paint_image(ui, rect, &uri, radius);
 }
 
 /// Artists, comma-separated, linked where they have a page; the subtitle

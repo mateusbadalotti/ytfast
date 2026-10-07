@@ -62,17 +62,17 @@ impl BytesLoader for Loader {
             uri.to_string(),
         );
         self.runtime.spawn(async move {
-            let result = async {
-                http.get(&uri)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await
+            let mut result = fetch(&http, &uri).await;
+            for smaller in smaller_stills(&uri) {
+                let missing = result
+                    .as_ref()
+                    .is_err_and(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND));
+                if !missing {
+                    break;
+                }
+                result = fetch(&http, &smaller).await;
             }
-            .await
-            .map(|b| Arc::<[u8]>::from(b.as_ref()))
-            .map_err(|e| e.to_string());
+            let result = result.map_err(|e| e.to_string());
             let mut cache = store.lock().unwrap_or_else(|e| e.into_inner());
             // Forgotten while loading: drop the answer.
             if let Some(entry) = cache.get_mut(&uri) {
@@ -103,6 +103,42 @@ impl BytesLoader for Loader {
 
     fn has_pending(&self) -> bool {
         self.cache().values().any(Poll::is_pending)
+    }
+}
+
+async fn fetch(http: &reqwest::Client, url: &str) -> reqwest::Result<Arc<[u8]>> {
+    let bytes = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    Ok(Arc::<[u8]>::from(bytes.as_ref()))
+}
+
+const STILLS: &str = "https://i.ytimg.com/vi/";
+pub const LARGEST_STILL: &str = "maxresdefault";
+
+/// A video's still by YouTube's name for its size: `default` is 120×90 and
+/// `maxresdefault` 1280×720. The listed thumbnails are smaller copies of
+/// these, signed, so they cannot be asked for in another size.
+pub fn still(thumbnails: &[Thumbnail], name: &str) -> Option<String> {
+    let id = thumbnails
+        .iter()
+        .find_map(|t| t.url.strip_prefix(STILLS)?.split('/').next())?;
+    Some(format!("{STILLS}{id}/{name}.jpg"))
+}
+
+/// What to fetch, in turn, when a video's largest still is missing: only HD
+/// uploads have one, some others lack `sddefault` too, and every public
+/// video has `hqdefault`.
+fn smaller_stills(uri: &str) -> Vec<String> {
+    match uri.strip_suffix(&format!("/{LARGEST_STILL}.jpg")) {
+        Some(base) if uri.starts_with(STILLS) => ["sddefault", "hqdefault"]
+            .map(|name| format!("{base}/{name}.jpg"))
+            .into(),
+        _ => Vec::new(),
     }
 }
 
@@ -193,6 +229,32 @@ mod tests {
             Some("https://lh3.googleusercontent.com/abc=w300-h300-l90-rj")
         );
         assert_eq!(art_url(&[], 10), None);
+    }
+
+    #[test]
+    fn stills_step_down_from_the_largest() {
+        let video = [thumb(
+            "https://i.ytimg.com/vi/abc/hqdefault.jpg?sqp=x&rs=y",
+            400,
+        )];
+        let largest = still(&video, LARGEST_STILL);
+        assert_eq!(
+            largest.as_deref(),
+            Some("https://i.ytimg.com/vi/abc/maxresdefault.jpg")
+        );
+        assert_eq!(
+            smaller_stills(&largest.unwrap()),
+            [
+                "https://i.ytimg.com/vi/abc/sddefault.jpg",
+                "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+            ]
+        );
+        assert!(smaller_stills("https://i.ytimg.com/vi/abc/hqdefault.jpg").is_empty());
+        let song = [thumb(
+            "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj",
+            60,
+        )];
+        assert_eq!(still(&song, LARGEST_STILL), None);
     }
 
     #[test]

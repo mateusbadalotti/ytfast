@@ -1,9 +1,9 @@
-//! The playing track across the window: its art large over a blur of
-//! itself, its name and its subtitle.
+//! The playing track across the window: its art large over a dimmed copy
+//! of itself, its name and its subtitle.
 
 use egui::{
-    Align, Color32, Frame, Key, Label, Layout, Rect, RichText, Sense, Ui, UiBuilder, Vec2, pos2,
-    vec2,
+    Align, Align2, Color32, FontId, Frame, Id, Key, Label, Layout, Rect, RichText, Sense, Ui,
+    UiBuilder, Vec2, pos2, vec2,
 };
 
 use crate::app::{Action, App};
@@ -16,8 +16,10 @@ const ART_MAX: f32 = 390.0;
 const ART_SCALE: f32 = 0.7;
 const ART_MIN: f32 = 160.0;
 const ART_TOP_MARGIN: f32 = 25.0;
-/// Under the art: the title and the artists.
-const TEXT_ROOM: f32 = 140.0;
+const TITLE_SIZE: f32 = 28.0;
+const TITLE_GAP: f32 = 22.0;
+/// The artists, or the video's details, sit this far above the player.
+const DETAILS_GAP: f32 = 16.0;
 const CLOSE_BUTTON: f32 = 36.0;
 const DIM_BACKDROP: u8 = 150;
 
@@ -56,30 +58,46 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                 rect.min + vec2(MARGIN, theme::DRAG_STRIP),
                 rect.max - Vec2::splat(MARGIN),
             );
-            // The art and the text under it, as one block in the middle.
-            let art = ((body.width() * 0.85).min(body.height() - TEXT_ROOM) * ART_SCALE)
+            let font = title_font(ui, &track.title, body.width());
+            let text_room = TITLE_GAP + ui.ctx().fonts_mut(|f| f.row_height(&font));
+            // The art and the title under it, as one block in the middle.
+            let art = ((body.width() * 0.85).min(body.height() - text_room) * ART_SCALE)
                 .clamp(ART_MIN, ART_MAX);
-            let block =
-                Rect::from_center_size(body.center(), vec2(art, ART_TOP_MARGIN + art + TEXT_ROOM));
+            let block = Rect::from_center_size(
+                body.center(),
+                vec2(body.width(), ART_TOP_MARGIN + art + text_room),
+            );
             let mut column = ui.new_child(
                 UiBuilder::new()
                     .id_salt("now-playing-track")
                     .max_rect(block)
-                    .layout(Layout::top_down(Align::Min)),
+                    .layout(Layout::top_down(Align::Center)),
             );
             column.add_space(ART_TOP_MARGIN);
             let (cover, _) = column.allocate_exact_size(Vec2::splat(art), Sense::hover());
-            widgets::paint_art(&column, cover, &track.thumbnails, 14.0);
-            column.add_space(22.0);
+            widgets::paint_cover(&column, cover, &track.thumbnails, 14.0);
+            column.add_space(TITLE_GAP);
             column.add(
-                Label::new(
-                    RichText::new(&track.title)
-                        .font(theme::display(28.0))
-                        .color(theme::TEXT),
-                )
-                .wrap(),
+                Label::new(RichText::new(&track.title).font(font).color(theme::TEXT)).extend(),
             );
-            column.add_space(4.0);
-            widgets::artist_links_wrapped(&mut column, track, 17.0, theme::SECONDARY, actions);
+
+            // Placed by its bottom edge, which an area knows once it is laid out.
+            egui::Area::new(Id::new("now-playing-details"))
+                .pivot(Align2::LEFT_BOTTOM)
+                .fixed_pos(pos2(cover.left(), rect.bottom() - DETAILS_GAP))
+                .show(ui.ctx(), |ui| {
+                    ui.set_max_width(body.right() - cover.left());
+                    widgets::artist_links_wrapped(ui, track, 17.0, theme::SECONDARY, actions);
+                });
         });
+}
+
+/// The title's font: full size, or as large as fits `width` on one line.
+fn title_font(ui: &Ui, title: &str, width: f32) -> FontId {
+    let full = ui
+        .painter()
+        .layout_no_wrap(title.to_owned(), theme::display(TITLE_SIZE), theme::TEXT)
+        .size()
+        .x;
+    theme::display(TITLE_SIZE * (width / full).min(1.0))
 }
