@@ -221,6 +221,12 @@ pub struct App {
     pub session_ready: bool,
     pub account: Option<Account>,
     pub signing_in: bool,
+    /// The session was read from the browser again this run, after YouTube
+    /// stopped taking the stored one; it is not tried twice.
+    session_refreshed: bool,
+    /// A rating YouTube refused for a lost session, sent again once the
+    /// session is back.
+    retry_rating: Option<(String, Rating)>,
     pub sign_in_error: Option<String>,
 
     pub playing: bool,
@@ -339,6 +345,8 @@ impl App {
             searches: HashMap::new(),
             account: None,
             signing_in: false,
+            session_refreshed: false,
+            retry_rating: None,
             sign_in_error: None,
             playing: false,
             loading: false,
@@ -426,6 +434,24 @@ impl App {
 
     // -----------------------------------------------------------------------
     // Loading
+
+    /// Reads the session from the browser again when YouTube stops taking the
+    /// stored one, once a run: the browser keeps its own fresh. False when it
+    /// was already tried.
+    fn refresh_session(&mut self) -> bool {
+        if self.session_refreshed || !self.signed_in {
+            return false;
+        }
+        self.session_refreshed = true;
+        log::info!(
+            "the YouTube session stopped working; reading it from {} again",
+            self.settings.browser
+        );
+        self.signing_in = true;
+        self.sign_in_error = None;
+        self.backend.sign_in(self.settings.browser.clone());
+        true
+    }
 
     fn load_account(&mut self) {
         let api = self.backend.api.clone();
@@ -1602,6 +1628,11 @@ impl App {
                     .insert((query, filter), Loadable::from_result(result));
             }
             Event::Library { browse_id, result } => {
+                if let Err(error) = &result
+                    && signed_out(error)
+                {
+                    self.refresh_session();
+                }
                 if browse_id == LIBRARY_PLAYLISTS
                     && let Ok(items) = &result
                 {
@@ -1659,6 +1690,12 @@ impl App {
             }
             Event::Rated { id, result } => {
                 if let Err(error) = result {
+                    if signed_out(&error) && self.refresh_session() {
+                        if let Some(rating) = self.ratings.get(&id) {
+                            self.retry_rating = Some((id, *rating));
+                        }
+                        return;
+                    }
                     self.toast(format!("Could not save that rating: {error:#}"));
                     self.rating_requests.remove(&id);
                     self.request_rating(id);
@@ -1670,16 +1707,21 @@ impl App {
             Event::Lyrics { id, result } => {
                 self.lyrics.insert(id, Loadable::from_result(result));
             }
-            Event::Account(result) => {
-                match result {
-                    Ok(Some(account)) => self.account = Some(account),
-                    Ok(None) => {
-                        self.account = None;
+            Event::Account(result) => match result {
+                Ok(Some(account)) => self.account = Some(account),
+                Ok(None) => {
+                    self.account = None;
+                    if !self.refresh_session() {
                         self.toast("YouTube no longer accepts the saved session. Sign in again in Settings.");
                     }
-                    Err(error) => log::warn!("account: {error:#}"),
                 }
-            }
+                Err(error) => {
+                    log::warn!("account: {error:#}");
+                    if signed_out(&error) {
+                        self.refresh_session();
+                    }
+                }
+            },
             Event::SignedIn(result) => {
                 self.signing_in = false;
                 match result {
@@ -1689,8 +1731,16 @@ impl App {
                         self.load_account();
                         self.home = Loadable::NotLoaded;
                         self.ensure_loaded(&Page::Home);
+                        if let Some((id, rating)) = self.retry_rating.take() {
+                            self.actions.push(Action::Rate(id, rating));
+                        }
                     }
-                    Err(error) => self.sign_in_error = Some(format!("{error:#}")),
+                    Err(error) => {
+                        if self.retry_rating.take().is_some() {
+                            self.toast("YouTube no longer accepts the saved session. Sign in again in Settings.");
+                        }
+                        self.sign_in_error = Some(format!("{error:#}"));
+                    }
                 }
             }
             Event::Art { id, path } => self.art_file = Some((id, path)),
@@ -1936,6 +1986,11 @@ impl App {
         self.dirty = false;
         self.saved_at = Instant::now();
     }
+}
+
+/// Whether YouTube answered as to someone signed out: the session is lost.
+fn signed_out(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("HTTP 401")
 }
 
 fn track_ref(item: &Item) -> TrackRef {

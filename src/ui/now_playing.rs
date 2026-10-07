@@ -12,7 +12,9 @@ use crate::theme::{self, Icon};
 use crate::ui::{side, widgets};
 
 const MARGIN: f32 = 56.0;
-const ART_MAX: f32 = 560.0;
+const ART_MAX: f32 = 390.0;
+/// The art's share of the room it could fill: it leaves the view some air.
+const ART_SCALE: f32 = 0.7;
 const ART_MIN: f32 = 160.0;
 /// Under the art: the title and the artists.
 const TEXT_ROOM: f32 = 140.0;
@@ -68,8 +70,7 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             };
 
             // The art and the text under it, as one block centred on its side.
-            let art = (art_side.width() * 0.85)
-                .min(art_side.height() - TEXT_ROOM)
+            let art = ((art_side.width() * 0.85).min(art_side.height() - TEXT_ROOM) * ART_SCALE)
                 .clamp(ART_MIN, ART_MAX);
             let block = Rect::from_center_size(art_side.center(), vec2(art, art + TEXT_ROOM));
             let mut column = ui.new_child(

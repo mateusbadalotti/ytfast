@@ -25,9 +25,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         drag_strip(ui);
     }
     let full = app.now_playing && app.current().is_some();
-    if !full {
-        sidebar::show(ui, app, &mut actions);
-    }
+    sidebar::show(ui, app, &mut actions);
     player_bar::show(ui, app, &mut actions);
     if full {
         now_playing::show(ui, app, &mut actions);
