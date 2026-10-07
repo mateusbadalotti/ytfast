@@ -115,15 +115,43 @@ pub fn pick(thumbnails: &[Thumbnail], px: u32) -> Option<&Thumbnail> {
         .or_else(|| thumbnails.iter().max_by_key(|t| t.width))
 }
 
-/// Google's image CDN renders any size asked for, so its URLs get `px`.
+/// Google's image CDN renders any size asked for, so its URLs get `px` on
+/// the longer side, in the shape the image was listed in. Only the size
+/// options change: the others stay, among them `p` and `c`, which crop the
+/// photo to that shape, so it is drawn unstretched.
 pub fn sized_url(thumbnail: &Thumbnail, px: u32) -> String {
     let url = &thumbnail.url;
-    if (url.contains("googleusercontent.com") || url.contains("ggpht.com"))
-        && let Some(at) = url.rfind('=')
-    {
-        return format!("{}=w{px}-h{px}-l90-rj", &url[..at]);
+    if !(url.contains("googleusercontent.com") || url.contains("ggpht.com")) {
+        return url.clone();
     }
-    url.clone()
+    let Some(at) = url.rfind('=') else {
+        return url.clone();
+    };
+    let is_size = |option: &&str| {
+        option.len() > 1
+            && option.starts_with(['w', 'h', 's'])
+            && option[1..].bytes().all(|b| b.is_ascii_digit())
+    };
+    let kept: Vec<&str> = url[at + 1..]
+        .split('-')
+        .filter(|option| !option.is_empty() && !is_size(option))
+        .collect();
+    let (width, height) = (
+        u64::from(thumbnail.width.max(1)),
+        u64::from(thumbnail.height.max(1)),
+    );
+    let long = u64::from(px);
+    let (w, h) = if width >= height {
+        (long, long * height / width)
+    } else {
+        (long * width / height, long)
+    };
+    let mut options = format!("w{w}-h{h}");
+    for option in kept {
+        options.push('-');
+        options.push_str(option);
+    }
+    format!("{}={options}", &url[..at])
 }
 
 pub fn art_url(thumbnails: &[Thumbnail], px: u32) -> Option<String> {
@@ -165,5 +193,31 @@ mod tests {
             Some("https://lh3.googleusercontent.com/abc=w300-h300-l90-rj")
         );
         assert_eq!(art_url(&[], 10), None);
+    }
+
+    #[test]
+    fn resizing_keeps_the_crop() {
+        let artist = thumb(
+            "https://lh3.googleusercontent.com/x=w544-h544-p-l90-rj",
+            544,
+        );
+        assert_eq!(
+            sized_url(&artist, 200),
+            "https://lh3.googleusercontent.com/x=w200-h200-p-l90-rj"
+        );
+        let banner = Thumbnail {
+            url: "https://lh3.googleusercontent.com/z=w1440-h600-p-l90-rj".into(),
+            width: 1440,
+            height: 600,
+        };
+        assert_eq!(
+            sized_url(&banner, 2000),
+            "https://lh3.googleusercontent.com/z=w2000-h833-p-l90-rj"
+        );
+        let avatar = thumb("https://yt3.ggpht.com/y=s88-c-k-c0x00ffffff-no-rj", 88);
+        assert_eq!(
+            sized_url(&avatar, 128),
+            "https://yt3.ggpht.com/y=w128-h128-c-k-c0x00ffffff-no-rj"
+        );
     }
 }
