@@ -129,6 +129,7 @@ pub enum Action {
     ToggleShuffle,
     CycleRepeat,
     Rate(String, Rating),
+    ToggleNowPlaying,
     ToggleSide(Side),
     /// A menu shows this track's rating: find it out if unknown.
     WantRating(String),
@@ -197,6 +198,8 @@ pub struct App {
     /// Sets by artist id, for Home's sets section.
     pub artist_sets: HashMap<String, Loadable<Vec<Item>>>,
     pub sets_artist: Option<String>,
+    /// The playing track fills the window.
+    pub now_playing: bool,
     /// Home's Long listens, asked for once the section shows.
     pub long_listens: Loadable<Vec<Item>>,
     /// The menu bar asked for the search field.
@@ -272,6 +275,11 @@ impl App {
             backend.http.clone(),
             backend.handle(),
         )));
+        #[cfg(target_os = "macos")]
+        {
+            let http = backend.http.clone();
+            backend.run(async move { Event::Updated(crate::update::install_latest(&http).await) });
+        }
         let emit = backend.emitter();
         let fetcher = player::Fetcher {
             http: backend.http.clone(),
@@ -317,6 +325,7 @@ impl App {
             artists: HashMap::new(),
             artist_sets: HashMap::new(),
             sets_artist: None,
+            now_playing: false,
             long_listens: Loadable::NotLoaded,
             focus_search: false,
             unmute_to,
@@ -724,6 +733,7 @@ impl App {
             Action::Open(page) => self.open(page),
             Action::OpenItem(item) => self.open_item(item),
             Action::Back => {
+                self.now_playing = false;
                 if let Some(page) = self.back.pop() {
                     self.forward
                         .push(std::mem::replace(&mut self.page, page.clone()));
@@ -731,6 +741,7 @@ impl App {
                 }
             }
             Action::Forward => {
+                self.now_playing = false;
                 if let Some(page) = self.forward.pop() {
                     self.back
                         .push(std::mem::replace(&mut self.page, page.clone()));
@@ -856,6 +867,7 @@ impl App {
                     }
                 });
             }
+            Action::ToggleNowPlaying => self.now_playing = !self.now_playing,
             Action::ToggleSide(side) => {
                 self.side = if self.side == Some(side) {
                     None
@@ -1106,6 +1118,7 @@ impl App {
     }
 
     fn open(&mut self, page: Page) {
+        self.now_playing = false;
         if page != self.page {
             self.back
                 .push(std::mem::replace(&mut self.page, page.clone()));
@@ -1693,6 +1706,8 @@ impl App {
             Event::SessionLoaded(session) => self.session_loaded(session),
             Event::Devices(devices) => self.devices = devices,
             Event::Player(event) => self.player_event(event),
+            #[cfg(target_os = "macos")]
+            Event::Updated(result) => self.updated(result),
         }
     }
 
@@ -1723,6 +1738,30 @@ impl App {
                 queue.add(fresh);
                 self.queue_edited();
             }
+        }
+    }
+
+    /// Reopens into a version just installed, unless something plays: then
+    /// it runs the next time the app opens.
+    #[cfg(target_os = "macos")]
+    fn updated(&mut self, result: anyhow::Result<Option<crate::update::Installed>>) {
+        let installed = match result {
+            Ok(Some(installed)) => installed,
+            Ok(None) => return,
+            Err(error) => return log::warn!("update: {error:#}"),
+        };
+        log::info!("updated to {}", installed.version);
+        if self.playing {
+            self.toast(format!(
+                "ytfast {} is installed: it opens next time",
+                installed.version
+            ));
+            return;
+        }
+        self.save();
+        match crate::update::relaunch(&installed.bundle) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => log::warn!("update: {error:#}"),
         }
     }
 

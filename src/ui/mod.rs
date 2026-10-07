@@ -3,6 +3,7 @@
 //! Views read the app and push `Action`s; apart from the search field's text
 //! and its focus request, nothing here changes the app's state directly.
 
+mod now_playing;
 mod pages;
 mod player_bar;
 mod settings;
@@ -23,11 +24,28 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if cfg!(target_os = "macos") {
         drag_strip(ui);
     }
-    sidebar::show(ui, app, &mut actions);
-    player_bar::show(ui, app, &mut actions);
-    if let Some(side) = app.side {
-        side::show(ui, app, side, &mut actions);
+    let full = app.now_playing && app.current().is_some();
+    if !full {
+        sidebar::show(ui, app, &mut actions);
     }
+    player_bar::show(ui, app, &mut actions);
+    if full {
+        now_playing::show(ui, app, &mut actions);
+    } else {
+        if let Some(side) = app.side {
+            side::show(ui, app, side, &mut actions);
+        }
+        page(ui, app, &mut actions);
+    }
+    if let Some(item) = &app.deleting {
+        confirm_delete(ui, item, &mut actions);
+    }
+    toasts(ui, app);
+    app.actions.extend(actions);
+}
+
+/// The page on screen, under the back and forward buttons and the search field.
+fn page(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
     egui::CentralPanel::default()
         .frame(Frame::new().fill(theme::BG))
         .show(ui, |ui| {
@@ -37,7 +55,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 vec2(rect.width(), 320.0_f32.min(rect.height())),
             );
             theme::gradient(ui.painter(), glow, theme::GLOW, theme::BG);
-            topbar(ui, app, &mut actions);
+            topbar(ui, app, actions);
             let page = app.page.clone();
             egui::ScrollArea::vertical()
                 .id_salt(("page", &page))
@@ -53,24 +71,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             match &page {
-                                Page::Home => pages::home(ui, app, &mut actions),
-                                Page::Search => pages::search(ui, app, &mut actions),
-                                Page::Library => pages::library(ui, app, &mut actions),
+                                Page::Home => pages::home(ui, app, actions),
+                                Page::Search => pages::search(ui, app, actions),
+                                Page::Library => pages::library(ui, app, actions),
                                 Page::Album(id) | Page::Playlist(id) => {
-                                    pages::collection(ui, app, id, &page, &mut actions)
+                                    pages::collection(ui, app, id, &page, actions)
                                 }
-                                Page::Artist(id) => pages::artist(ui, app, id, &mut actions),
-                                Page::Browse(target) => pages::feed(ui, app, target, &mut actions),
-                                Page::Settings => settings::show(ui, app, &mut actions),
+                                Page::Artist(id) => pages::artist(ui, app, id, actions),
+                                Page::Browse(target) => pages::feed(ui, app, target, actions),
+                                Page::Settings => settings::show(ui, app, actions),
                             }
                         });
                 });
         });
-    if let Some(item) = &app.deleting {
-        confirm_delete(ui, item, &mut actions);
-    }
-    toasts(ui, app);
-    app.actions.extend(actions);
 }
 
 /// Without a title bar, the empty top of the window moves it, and a double

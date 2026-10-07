@@ -20,3 +20,5 @@ pub mod settings;
 pub mod stream;
 pub mod theme;
 pub mod ui;
+#[cfg(target_os = "macos")]
+pub mod update;

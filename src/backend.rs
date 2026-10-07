@@ -145,6 +145,9 @@ pub enum Event {
         result: Result<()>,
     },
     Player(player::Event),
+    /// The newest release, put in place of the running app.
+    #[cfg(target_os = "macos")]
+    Updated(Result<Option<crate::update::Installed>>),
 }
 
 pub struct Backend {

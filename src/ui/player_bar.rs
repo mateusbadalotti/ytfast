@@ -7,7 +7,7 @@ use egui::{
 };
 
 use crate::app::{Action, App, Side};
-use crate::model::{Loadable, Page, Rating};
+use crate::model::{Loadable, Rating};
 use crate::queue::Repeat;
 use crate::theme::{self, Icon};
 use crate::ui::widgets::{self, format_time, icon_button, icon_button_at};
@@ -68,21 +68,19 @@ fn track(ui: &mut Ui, app: &App, rect: Rect, actions: &mut Vec<Action>) {
         );
         return;
     };
-    // The whole column opens the track's menu; the art and the artist links
-    // drawn over it keep their own clicks.
+    // The whole column opens the track across the window, and its menu; the
+    // artist links and the like button drawn over it keep their own clicks.
     let column_click = ui.interact(rect, Id::new("player-track"), Sense::click());
     column_click.context_menu(|ui| widgets::item_menu(ui, track, app, actions));
+    if column_click
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Show the track across the window")
+        .clicked()
+    {
+        actions.push(Action::ToggleNowPlaying);
+    }
     let art = Rect::from_min_size(pos2(rect.left(), middle - ART / 2.0), Vec2::splat(ART));
     widgets::paint_art(ui, art, &track.thumbnails, 6.0);
-    let art_click = ui.interact(art, Id::new("player-art"), Sense::click());
-    art_click.context_menu(|ui| widgets::item_menu(ui, track, app, actions));
-    if art_click
-        .on_hover_cursor(CursorIcon::PointingHand)
-        .clicked()
-        && let Some(id) = track.album.as_ref().and_then(|a| a.id.clone())
-    {
-        actions.push(Action::Open(Page::Album(id)));
-    }
     // Room at the end for the like button, which follows the text.
     let text = Rect::from_min_max(
         pos2(art.right() + 12.0, middle - 21.0),

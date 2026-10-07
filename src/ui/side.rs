@@ -41,7 +41,7 @@ pub fn show(ui: &mut Ui, app: &App, side: Side, actions: &mut Vec<Action>) {
             ui.add_space(10.0);
             match side {
                 Side::Queue => queue(ui, app, actions),
-                Side::Lyrics => lyrics(ui, app, actions),
+                Side::Lyrics => lyrics(ui, app, actions, SIDE_LYRICS),
             }
         });
 }
@@ -108,7 +108,11 @@ fn queue(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         });
 }
 
-fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+/// The lyrics' line size in the panel; the line playing is a little larger.
+const SIDE_LYRICS: f32 = 18.0;
+
+/// The playing track's lyrics, synced ones following the song, at `size`.
+pub(super) fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, size: f32) {
     let Some(track) = app.current() else {
         widgets::empty(ui, "Play something to see its lyrics.");
         return;
@@ -137,8 +141,10 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
         _ => return widgets::loading(ui),
     };
     let position = app.position() as f32;
+    // Each view of the lyrics scrolls and follows the song on its own.
+    let view = size as u32;
     egui::ScrollArea::vertical()
-        .id_salt(("lyrics", &track.id))
+        .id_salt(("lyrics", &track.id, view))
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -146,7 +152,7 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                 LyricsText::Plain(text) => {
                     ui.label(
                         RichText::new(text)
-                            .font(theme::medium(16.0))
+                            .font(theme::medium(size - 2.0))
                             .color(theme::TEXT),
                     );
                 }
@@ -161,11 +167,11 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                             line.text.as_str()
                         };
                         let (font, color) = if current {
-                            (theme::display(21.0), theme::TEXT)
+                            (theme::display(size + 3.0), theme::TEXT)
                         } else if active.is_some_and(|a| i < a) {
-                            (theme::semibold(18.0), theme::DIM)
+                            (theme::semibold(size), theme::DIM)
                         } else {
-                            (theme::semibold(18.0), theme::SECONDARY)
+                            (theme::semibold(size), theme::SECONDARY)
                         };
                         let response = ui.add(
                             egui::Label::new(RichText::new(text).font(font).color(color))
@@ -177,7 +183,7 @@ fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                         }
                         if current {
                             // Follow the song: centre the line once each time it changes.
-                            let key = Id::new(("lyrics-line", &track.id));
+                            let key = Id::new(("lyrics-line", &track.id, view));
                             if ui.data(|d| d.get_temp::<usize>(key)) != Some(i) {
                                 ui.data_mut(|d| d.insert_temp(key, i));
                                 response.scroll_to_me(Some(Align::Center));

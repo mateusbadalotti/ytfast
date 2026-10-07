@@ -165,6 +165,20 @@ pub fn pill(ui: &mut Ui, icon: Option<Icon>, text: &str, primary: bool) -> Respo
 
 /// The part of a still to show in a box of `aspect`: centred, and for
 /// YouTube's 4:3 stills, inside their letterbox bars.
+/// Pixels of the copy a backdrop is stretched from.
+const BACKDROP_PX: u32 = 32;
+
+/// The art from a tiny copy stretched over `rect`, which blurs it: a
+/// backdrop, not a picture.
+pub fn paint_backdrop(ui: &Ui, rect: Rect, thumbnails: &[Thumbnail]) {
+    let Some(thumbnail) = images::pick(thumbnails, BACKDROP_PX) else {
+        return;
+    };
+    egui::Image::new(images::sized_url(thumbnail, BACKDROP_PX))
+        .uv(crop(thumbnail, rect.width() / rect.height()))
+        .paint_at(ui, rect);
+}
+
 fn crop(thumbnail: &Thumbnail, aspect: f32) -> Rect {
     let mut uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     let (w, mut h) = (
