@@ -272,12 +272,14 @@ fn extras(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     if widgets::slider(ui, &mut volume, 0.0..=1.0, VOLUME_WIDTH, false).changed() {
         actions.push(Action::Volume(volume));
     }
-    let icon = if volume <= 0.0 {
-        Icon::Muted
+    let (icon, tip) = if volume <= 0.0 {
+        (Icon::Muted, "Unmute")
     } else {
-        Icon::Volume
+        (Icon::Volume, "Mute")
     };
-    ui.add(icon.image(theme::SECONDARY, 18.0));
+    if icon_button(ui, icon, 18.0, theme::SECONDARY, tip).clicked() {
+        actions.push(Action::ToggleMute);
+    }
     ui.add_space(10.0);
     if icon_button(
         ui,

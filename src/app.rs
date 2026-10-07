@@ -51,6 +51,8 @@ const WARM_AFTER: Duration = Duration::from_millis(150);
 /// Tracks resolved ahead when an album or playlist opens.
 const WARM_TOP: usize = 3;
 const RECENT_SEARCHES: usize = 10;
+/// Unmuting never lands on silence, should the app have started muted.
+const MIN_UNMUTED: f32 = 0.2;
 
 /// What the menu bar's seek and volume items move by.
 #[cfg(target_os = "macos")]
@@ -130,6 +132,8 @@ pub enum Action {
     CycleRepeat,
     Rate(String, Rating),
     ToggleNowPlaying,
+    /// Mutes, or brings back the volume from before the mute.
+    ToggleMute,
     ToggleSide(Side),
     /// A menu shows this track's rating: find it out if unknown.
     WantRating(String),
@@ -434,6 +438,12 @@ impl App {
 
     // -----------------------------------------------------------------------
     // Loading
+
+    fn set_volume(&mut self, volume: f32) {
+        self.settings.volume = volume.clamp(0.0, 1.0);
+        self.player.send(Command::Volume(self.settings.volume));
+        self.dirty = true;
+    }
 
     /// Reads the session from the browser again when YouTube stops taking the
     /// stored one, once a run: the browser keeps its own fresh. False when it
@@ -869,10 +879,15 @@ impl App {
                 }
             }
             Action::Seek(seconds) => self.seek(seconds),
-            Action::Volume(volume) => {
-                self.settings.volume = volume.clamp(0.0, 1.0);
-                self.player.send(Command::Volume(self.settings.volume));
-                self.dirty = true;
+            Action::Volume(volume) => self.set_volume(volume),
+            Action::ToggleMute => {
+                let volume = self.settings.volume;
+                if volume > 0.0 {
+                    self.unmute_to = volume;
+                    self.set_volume(0.0);
+                } else {
+                    self.set_volume(self.unmute_to.max(MIN_UNMUTED));
+                }
             }
             Action::ToggleShuffle => {
                 let on = !self.settings.queue.shuffle;
@@ -1215,11 +1230,7 @@ impl App {
             }
             MenuCommand::VolumeUp => Action::Volume(volume + MENU_VOLUME_STEP),
             MenuCommand::VolumeDown => Action::Volume(volume - MENU_VOLUME_STEP),
-            MenuCommand::ToggleMute if volume > 0.0 => {
-                self.unmute_to = volume;
-                Action::Volume(0.0)
-            }
-            MenuCommand::ToggleMute => Action::Volume(self.unmute_to),
+            MenuCommand::ToggleMute => Action::ToggleMute,
             MenuCommand::Back => Action::Back,
             MenuCommand::Forward => Action::Forward,
             MenuCommand::Home => Action::Open(Page::Home),
