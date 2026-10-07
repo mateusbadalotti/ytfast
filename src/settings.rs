@@ -34,6 +34,8 @@ pub struct Settings {
     pub pinned: Vec<String>,
     /// The last searches, newest first.
     pub recent_searches: Vec<String>,
+    /// The version that last ran, to tell the person when it changed.
+    pub last_version: String,
     /// Home's sections, by YouTube's titles: the order set for them, and
     /// the ones left out.
     pub home_order: Vec<String>,
@@ -69,6 +71,7 @@ impl Default for Settings {
             second_output: None,
             pinned: Vec::new(),
             recent_searches: Vec::new(),
+            last_version: String::new(),
             home_order: Vec::new(),
             home_hidden: Vec::new(),
             home_known: Vec::new(),

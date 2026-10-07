@@ -227,35 +227,57 @@ pub fn artist_links(
     color: Color32,
     actions: &mut Vec<Action>,
 ) {
+    ui.horizontal(|ui| artist_runs(ui, item, size, color, actions, false));
+}
+
+/// `artist_links` over as many lines as it takes, cutting nothing.
+pub fn artist_links_wrapped(
+    ui: &mut Ui,
+    item: &Item,
+    size: f32,
+    color: Color32,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal_wrapped(|ui| artist_runs(ui, item, size, color, actions, true));
+}
+
+fn artist_runs(
+    ui: &mut Ui,
+    item: &Item,
+    size: f32,
+    color: Color32,
+    actions: &mut Vec<Action>,
+    whole: bool,
+) {
     let font = theme::body(size);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        if item.artists.is_empty() {
-            ui.add(
-                Label::new(
-                    RichText::new(&item.subtitle)
-                        .font(font.clone())
-                        .color(color),
-                )
-                .truncate(),
-            );
-            return;
+    ui.spacing_mut().item_spacing.x = 0.0;
+    if item.artists.is_empty() {
+        let label = Label::new(
+            RichText::new(&item.subtitle)
+                .font(font.clone())
+                .color(color),
+        );
+        ui.add(if whole {
+            label.wrap()
+        } else {
+            label.truncate()
+        });
+        return;
+    }
+    for (i, artist) in item.artists.iter().enumerate() {
+        if i > 0 {
+            ui.label(RichText::new(", ").font(font.clone()).color(color));
         }
-        for (i, artist) in item.artists.iter().enumerate() {
-            if i > 0 {
-                ui.label(RichText::new(", ").font(font.clone()).color(color));
-            }
-            let text = RichText::new(&artist.name).font(font.clone()).color(color);
-            match &artist.id {
-                Some(id) => {
-                    if ui.add(egui::Link::new(text)).clicked() {
-                        actions.push(Action::Open(Page::Artist(id.clone())));
-                    }
+        let text = RichText::new(&artist.name).font(font.clone()).color(color);
+        match &artist.id {
+            Some(id) => {
+                if ui.add(egui::Link::new(text)).clicked() {
+                    actions.push(Action::Open(Page::Artist(id.clone())));
                 }
-                None => _ = ui.label(text),
             }
+            None => _ = ui.label(text),
         }
-    });
+    }
 }
 
 const MENU_WIDTH: f32 = 248.0;

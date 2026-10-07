@@ -16,18 +16,19 @@ const BUNDLE_ID: &str = "com.github.mateusbadalotti.ytfast";
 /// Every request names itself: GitHub's API refuses one that does not.
 const USER_AGENT: &str = concat!("ytfast/", env!("CARGO_PKG_VERSION"));
 
-/// A newer version now in place of the running app.
-pub struct Installed {
+/// A newer release, found but not yet installed.
+pub struct Release {
     pub version: String,
-    pub bundle: PathBuf,
+    url: String,
+    digest: Option<String>,
 }
 
-/// Puts the newest release in place of this app when it is newer. Nothing
-/// happens outside an app bundle, as under `cargo run`.
-pub async fn install_latest(http: &reqwest::Client) -> Result<Option<Installed>> {
-    let Some(bundle) = running_bundle() else {
+/// The newest release, when it is newer than this app. Nothing is offered
+/// outside an app bundle, as under `cargo run`.
+pub async fn newer_release(http: &reqwest::Client) -> Result<Option<Release>> {
+    if running_bundle().is_none() {
         return Ok(None);
-    };
+    }
     let release: Value = http
         .get(LATEST)
         .header("Accept", "application/vnd.github+json")
@@ -53,8 +54,19 @@ pub async fn install_latest(http: &reqwest::Client) -> Result<Option<Installed>>
     let url = asset["browser_download_url"]
         .as_str()
         .context("the asset has no download link")?;
+    Ok(Some(Release {
+        version: version.to_string(),
+        url: url.to_string(),
+        digest: asset["digest"].as_str().map(str::to_string),
+    }))
+}
+
+/// Downloads `release` and puts it in place of this app; returns the bundle,
+/// which then holds the new version.
+pub async fn install_release(http: &reqwest::Client, release: &Release) -> Result<PathBuf> {
+    let bundle = running_bundle().context("not running from an app bundle")?;
     let archive = http
-        .get(url)
+        .get(&release.url)
         .header("User-Agent", USER_AGENT)
         .send()
         .await?
@@ -67,16 +79,13 @@ pub async fn install_latest(http: &reqwest::Client) -> Result<Option<Installed>>
         &bundle,
         &staging,
         &archive,
-        asset["digest"].as_str(),
-        version,
+        release.digest.as_deref(),
+        &release.version,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&staging).await;
     result?;
-    Ok(Some(Installed {
-        version: version.to_string(),
-        bundle,
-    }))
+    Ok(bundle)
 }
 
 async fn install(

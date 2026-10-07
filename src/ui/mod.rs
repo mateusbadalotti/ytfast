@@ -13,7 +13,7 @@ mod widgets;
 
 use egui::{Align, Frame, Id, Layout, Margin, Rect, RichText, Sense, Ui, ViewportCommand, vec2};
 
-use crate::app::{Action, App};
+use crate::app::{Action, App, UpdateNotice};
 use crate::model::{Item, Page};
 use crate::theme::{self, Icon};
 
@@ -39,6 +39,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         confirm_delete(ui, item, &mut actions);
     }
     toasts(ui, app);
+    update_notice(ui, app, &mut actions);
     app.actions.extend(actions);
 }
 
@@ -204,6 +205,132 @@ fn confirm_delete(ui: &mut Ui, item: &Item, actions: &mut Vec<Action>) {
         // Escape or a click outside.
         actions.push(Action::CancelDelete);
     }
+}
+
+const NOTICE_WIDTH: f32 = 320.0;
+const NOTICE_BADGE: f32 = 36.0;
+/// How often the card redraws while it counts down.
+const COUNTDOWN_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The update card in the bottom right corner, over the page: what the app
+/// is doing about an update, and the buttons for it.
+fn update_notice(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    let (title, detail, icon, buttons): (String, String, Icon, Vec<(&str, Action, bool)>) =
+        match &app.update {
+            UpdateNotice::None => return,
+            UpdateNotice::Installing { version } => (
+                format!("Updating to ytfast {version}"),
+                "Downloading and checking the new version…".to_string(),
+                Icon::Refresh,
+                Vec::new(),
+            ),
+            UpdateNotice::Ready {
+                version,
+                restart_at: Some(at),
+                ..
+            } => {
+                ui.ctx().request_repaint_after(COUNTDOWN_TICK);
+                let left = at.saturating_duration_since(std::time::Instant::now());
+                (
+                    format!("ytfast {version} is ready"),
+                    format!("Reopening in {} s to finish.", left.as_secs() + 1),
+                    Icon::Refresh,
+                    vec![
+                        ("Restart now", Action::RestartToUpdate, true),
+                        ("Later", Action::DismissUpdate, false),
+                    ],
+                )
+            }
+            UpdateNotice::Ready { version, .. } => (
+                format!("ytfast {version} is installed"),
+                "It opens the next time ytfast starts, or now.".to_string(),
+                Icon::Refresh,
+                vec![
+                    ("Restart now", Action::RestartToUpdate, true),
+                    ("Later", Action::DismissUpdate, false),
+                ],
+            ),
+            UpdateNotice::Updated { version, .. } => (
+                format!("Updated to ytfast {version}"),
+                "See what changed in this version.".to_string(),
+                Icon::Check,
+                vec![
+                    (
+                        "What's new",
+                        Action::OpenReleaseNotes(version.clone()),
+                        true,
+                    ),
+                    ("Close", Action::DismissUpdate, false),
+                ],
+            ),
+        };
+    let shown = ui.ctx().animate_bool(Id::new("update-notice"), true);
+    egui::Area::new(Id::new("update-notice-card"))
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            vec2(-18.0, -(theme::PLAYER_HEIGHT + 18.0 - (1.0 - shown) * 12.0)),
+        )
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            ui.multiply_opacity(shown);
+            Frame::new()
+                .fill(theme::RAISED)
+                .stroke(egui::Stroke::new(1.0, theme::OUTLINE))
+                .corner_radius(14.0)
+                .inner_margin(Margin::same(16))
+                .show(ui, |ui| {
+                    ui.set_width(NOTICE_WIDTH);
+                    ui.horizontal_top(|ui| {
+                        let (badge, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(NOTICE_BADGE), Sense::hover());
+                        ui.painter().circle_filled(
+                            badge.center(),
+                            NOTICE_BADGE / 2.0,
+                            theme::ACCENT,
+                        );
+                        if matches!(app.update, UpdateNotice::Installing { .. }) {
+                            ui.put(
+                                Rect::from_center_size(badge.center(), egui::Vec2::splat(18.0)),
+                                egui::Spinner::new().size(18.0).color(egui::Color32::WHITE),
+                            );
+                        } else {
+                            icon.image(egui::Color32::WHITE, 18.0).paint_at(
+                                ui,
+                                Rect::from_center_size(badge.center(), egui::Vec2::splat(18.0)),
+                            );
+                        }
+                        ui.add_space(4.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(
+                                RichText::new(title)
+                                    .font(theme::semibold(14.5))
+                                    .color(theme::TEXT),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(detail)
+                                        .font(theme::body(12.5))
+                                        .color(theme::SECONDARY),
+                                )
+                                .wrap(),
+                            );
+                        });
+                    });
+                    if buttons.is_empty() {
+                        return;
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(NOTICE_BADGE + 4.0 + ui.spacing().item_spacing.x);
+                        for (label, action, primary) in buttons {
+                            if widgets::pill(ui, None, label, primary).clicked() {
+                                actions.push(action);
+                            }
+                        }
+                    });
+                });
+        });
 }
 
 fn toasts(ui: &mut Ui, app: &App) {

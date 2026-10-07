@@ -112,7 +112,7 @@ fn queue(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
 const SIDE_LYRICS: f32 = 18.0;
 
 /// The playing track's lyrics, synced ones following the song, at `size`.
-pub(super) fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, size: f32) {
+fn lyrics(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, size: f32) {
     let Some(track) = app.current() else {
         widgets::empty(ui, "Play something to see its lyrics.");
         return;

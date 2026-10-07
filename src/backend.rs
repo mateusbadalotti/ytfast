@@ -145,9 +145,15 @@ pub enum Event {
         result: Result<()>,
     },
     Player(player::Event),
-    /// The newest release, put in place of the running app.
+    /// A release newer than the running app, found at launch.
     #[cfg(target_os = "macos")]
-    Updated(Result<Option<crate::update::Installed>>),
+    UpdateFound(Result<Option<crate::update::Release>>),
+    /// That release, in place of the running app: its bundle.
+    #[cfg(target_os = "macos")]
+    UpdateInstalled {
+        version: String,
+        result: Result<std::path::PathBuf>,
+    },
 }
 
 pub struct Backend {

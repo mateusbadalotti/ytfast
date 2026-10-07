@@ -1,5 +1,5 @@
 //! The playing track across the window: its art large over a blur of
-//! itself, its name, and its lyrics beside it when it has any.
+//! itself, its name and its subtitle.
 
 use egui::{
     Align, Color32, Frame, Key, Label, Layout, Rect, RichText, Sense, Ui, UiBuilder, Vec2, pos2,
@@ -7,21 +7,18 @@ use egui::{
 };
 
 use crate::app::{Action, App};
-use crate::model::Loadable;
 use crate::theme::{self, Icon};
-use crate::ui::{side, widgets};
+use crate::ui::widgets;
 
 const MARGIN: f32 = 56.0;
 const ART_MAX: f32 = 390.0;
 /// The art's share of the room it could fill: it leaves the view some air.
 const ART_SCALE: f32 = 0.7;
 const ART_MIN: f32 = 160.0;
+const ART_TOP_MARGIN: f32 = 25.0;
 /// Under the art: the title and the artists.
 const TEXT_ROOM: f32 = 140.0;
-/// The share of the width the art takes when lyrics sit beside it.
-const ART_SHARE: f32 = 0.46;
 const CLOSE_BUTTON: f32 = 36.0;
-const LYRICS_SIZE: f32 = 26.0;
 const DIM_BACKDROP: u8 = 150;
 
 pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
@@ -59,26 +56,18 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                 rect.min + vec2(MARGIN, theme::DRAG_STRIP),
                 rect.max - Vec2::splat(MARGIN),
             );
-            let has_lyrics = matches!(app.lyrics.get(&track.id), Some(Loadable::Loaded(Some(_))));
-            let art_side = if has_lyrics {
-                Rect::from_min_max(
-                    body.min,
-                    pos2(body.left() + body.width() * ART_SHARE, body.bottom()),
-                )
-            } else {
-                body
-            };
-
-            // The art and the text under it, as one block centred on its side.
-            let art = ((art_side.width() * 0.85).min(art_side.height() - TEXT_ROOM) * ART_SCALE)
+            // The art and the text under it, as one block in the middle.
+            let art = ((body.width() * 0.85).min(body.height() - TEXT_ROOM) * ART_SCALE)
                 .clamp(ART_MIN, ART_MAX);
-            let block = Rect::from_center_size(art_side.center(), vec2(art, art + TEXT_ROOM));
+            let block =
+                Rect::from_center_size(body.center(), vec2(art, ART_TOP_MARGIN + art + TEXT_ROOM));
             let mut column = ui.new_child(
                 UiBuilder::new()
                     .id_salt("now-playing-track")
                     .max_rect(block)
                     .layout(Layout::top_down(Align::Min)),
             );
+            column.add_space(ART_TOP_MARGIN);
             let (cover, _) = column.allocate_exact_size(Vec2::splat(art), Sense::hover());
             widgets::paint_art(&column, cover, &track.thumbnails, 14.0);
             column.add_space(22.0);
@@ -88,31 +77,9 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                         .font(theme::display(28.0))
                         .color(theme::TEXT),
                 )
-                .truncate(),
+                .wrap(),
             );
             column.add_space(4.0);
-            widgets::artist_links(&mut column, track, 17.0, theme::SECONDARY, actions);
-            if let Some(album) = &track.album {
-                column.add(
-                    Label::new(
-                        RichText::new(&album.name)
-                            .font(theme::body(14.0))
-                            .color(theme::DIM),
-                    )
-                    .truncate(),
-                );
-            }
-
-            if has_lyrics {
-                let lyrics_side =
-                    Rect::from_min_max(pos2(art_side.right() + MARGIN, body.top()), body.max);
-                let mut lyrics = ui.new_child(
-                    UiBuilder::new()
-                        .id_salt("now-playing-lyrics")
-                        .max_rect(lyrics_side)
-                        .layout(Layout::top_down(Align::Min)),
-                );
-                side::lyrics(&mut lyrics, app, actions, LYRICS_SIZE);
-            }
+            widgets::artist_links_wrapped(&mut column, track, 17.0, theme::SECONDARY, actions);
         });
 }

@@ -59,8 +59,33 @@ const MIN_UNMUTED: f32 = 0.2;
 const MENU_SEEK: f64 = 10.0;
 #[cfg(target_os = "macos")]
 const MENU_VOLUME_STEP: f32 = 0.05;
-#[cfg(target_os = "macos")]
 const REPO_URL: &str = "https://github.com/mateusbadalotti/ytfast";
+/// How long the corner card counts down before reopening into an update.
+#[cfg(target_os = "macos")]
+const RESTART_AFTER: Duration = Duration::from_secs(4);
+/// How long the corner card says the app was updated.
+const UPDATED_NOTICE_FOR: Duration = Duration::from_secs(10);
+
+/// What the corner card says about updates.
+pub enum UpdateNotice {
+    None,
+    /// Downloading and checking a newer release.
+    Installing {
+        version: String,
+    },
+    /// In place of the running app; it reopens at `restart_at` unless
+    /// something plays, or on Restart now.
+    Ready {
+        version: String,
+        bundle: std::path::PathBuf,
+        restart_at: Option<Instant>,
+    },
+    /// This run is a version newer than the last one.
+    Updated {
+        version: String,
+        until: Instant,
+    },
+}
 
 /// Home's own sections, ordered and hidden by title like YouTube's.
 pub const HOME_PLAYLISTS: &str = "Your playlists";
@@ -132,6 +157,10 @@ pub enum Action {
     CycleRepeat,
     Rate(String, Rating),
     ToggleNowPlaying,
+    /// From the update card.
+    RestartToUpdate,
+    DismissUpdate,
+    OpenReleaseNotes(String),
     /// Mutes, or brings back the volume from before the mute.
     ToggleMute,
     ToggleSide(Side),
@@ -191,6 +220,8 @@ pub struct App {
     pub settings: Settings,
     dirty: bool,
     saved_at: Instant,
+    /// What the corner card says about updates.
+    pub update: UpdateNotice,
 
     pub page: Page,
     back: Vec<Page>,
@@ -276,7 +307,19 @@ impl App {
             let waker = ctx.clone();
             crate::mac_menu::set_waker(move || waker.request_repaint());
         }
-        let settings = Settings::load(&paths.state);
+        let mut settings = Settings::load(&paths.state);
+        // A run on a version other than the last one tells what changed.
+        let version = env!("CARGO_PKG_VERSION");
+        let version_changed = settings.last_version != version;
+        let update = if version_changed && !settings.last_version.is_empty() {
+            UpdateNotice::Updated {
+                version: version.to_string(),
+                until: Instant::now() + UPDATED_NOTICE_FOR,
+            }
+        } else {
+            UpdateNotice::None
+        };
+        settings.last_version = version.to_string();
         let backend = match Backend::new(ctx.clone(), paths) {
             Ok(backend) => backend,
             Err(error) => panic!("could not start the network runtime: {error}"),
@@ -288,7 +331,8 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             let http = backend.http.clone();
-            backend.run(async move { Event::Updated(crate::update::install_latest(&http).await) });
+            backend
+                .run(async move { Event::UpdateFound(crate::update::newer_release(&http).await) });
         }
         let emit = backend.emitter();
         let fetcher = player::Fetcher {
@@ -324,8 +368,9 @@ impl App {
             player,
             controls,
             settings,
-            dirty: false,
+            dirty: version_changed,
             saved_at: Instant::now(),
+            update,
             page: Page::Home,
             back: Vec::new(),
             forward: Vec::new(),
@@ -909,12 +954,23 @@ impl App {
                 });
             }
             Action::ToggleNowPlaying => self.now_playing = !self.now_playing,
+            Action::RestartToUpdate => self.restart_to_update(),
+            // A dismissed update still opens the next time.
+            Action::DismissUpdate => self.update = UpdateNotice::None,
+            Action::OpenReleaseNotes(version) => {
+                ctx.open_url(egui::OpenUrl::new_tab(format!(
+                    "{REPO_URL}/releases/tag/v{version}"
+                )));
+                self.update = UpdateNotice::None;
+            }
             Action::ToggleSide(side) => {
-                self.side = if self.side == Some(side) {
+                // From the full view the panel opens in the normal layout.
+                self.side = if self.side == Some(side) && !self.now_playing {
                     None
                 } else {
                     Some(side)
                 };
+                self.now_playing = false;
                 self.want_lyrics();
             }
             Action::RetryLyrics => {
@@ -1768,7 +1824,9 @@ impl App {
             Event::Devices(devices) => self.devices = devices,
             Event::Player(event) => self.player_event(event),
             #[cfg(target_os = "macos")]
-            Event::Updated(result) => self.updated(result),
+            Event::UpdateFound(result) => self.update_found(result),
+            #[cfg(target_os = "macos")]
+            Event::UpdateInstalled { version, result } => self.update_installed(version, result),
         }
     }
 
@@ -1802,27 +1860,82 @@ impl App {
         }
     }
 
-    /// Reopens into a version just installed, unless something plays: then
-    /// it runs the next time the app opens.
+    /// A newer release was found: install it, saying so in the corner.
     #[cfg(target_os = "macos")]
-    fn updated(&mut self, result: anyhow::Result<Option<crate::update::Installed>>) {
-        let installed = match result {
-            Ok(Some(installed)) => installed,
+    fn update_found(&mut self, result: anyhow::Result<Option<crate::update::Release>>) {
+        let release = match result {
+            Ok(Some(release)) => release,
             Ok(None) => return,
             Err(error) => return log::warn!("update: {error:#}"),
         };
-        log::info!("updated to {}", installed.version);
-        if self.playing {
-            self.toast(format!(
-                "ytfast {} is installed: it opens next time",
-                installed.version
-            ));
-            return;
+        log::info!("updating to {}", release.version);
+        self.update = UpdateNotice::Installing {
+            version: release.version.clone(),
+        };
+        let http = self.backend.http.clone();
+        self.backend.run(async move {
+            Event::UpdateInstalled {
+                result: crate::update::install_release(&http, &release).await,
+                version: release.version,
+            }
+        });
+    }
+
+    /// The new version is in place: reopen into it shortly, unless something
+    /// plays, then it opens the next time.
+    #[cfg(target_os = "macos")]
+    fn update_installed(&mut self, version: String, result: anyhow::Result<std::path::PathBuf>) {
+        match result {
+            Ok(bundle) => {
+                log::info!("updated to {version}");
+                let restart_at = (!self.playing).then(|| Instant::now() + RESTART_AFTER);
+                self.update = UpdateNotice::Ready {
+                    version,
+                    bundle,
+                    restart_at,
+                };
+            }
+            Err(error) => {
+                log::warn!("update to {version}: {error:#}");
+                self.update = UpdateNotice::None;
+                self.toast(format!("Could not update to ytfast {version}"));
+            }
         }
-        self.save();
-        match crate::update::relaunch(&installed.bundle) {
-            Ok(()) => std::process::exit(0),
-            Err(error) => log::warn!("update: {error:#}"),
+    }
+
+    /// Runs the corner card's clock: the countdown to reopening, which music
+    /// starting holds off, and the "updated" note that goes by itself.
+    fn tick_update(&mut self) {
+        let now = Instant::now();
+        let due = matches!(
+            &self.update,
+            UpdateNotice::Ready { restart_at: Some(at), .. } if now >= *at
+        );
+        if due && self.playing {
+            if let UpdateNotice::Ready { restart_at, .. } = &mut self.update {
+                *restart_at = None;
+            }
+        } else if due {
+            self.restart_to_update();
+        }
+        if matches!(&self.update, UpdateNotice::Updated { until, .. } if now >= *until) {
+            self.update = UpdateNotice::None;
+        }
+    }
+
+    /// Quits and opens the version now in place.
+    fn restart_to_update(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let bundle = match &self.update {
+                UpdateNotice::Ready { bundle, .. } => bundle.clone(),
+                _ => return,
+            };
+            self.save();
+            match crate::update::relaunch(&bundle) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => log::warn!("update: {error:#}"),
+            }
         }
     }
 
@@ -2017,6 +2130,7 @@ impl eframe::App for App {
         for event in self.backend.events() {
             self.handle(event);
         }
+        self.tick_update();
         #[cfg(target_os = "macos")]
         for command in crate::mac_menu::drain() {
             self.menu_command(command, &ctx);
